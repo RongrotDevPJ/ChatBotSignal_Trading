@@ -10,7 +10,7 @@ class VirtualTracker:
         self._load_history()
 
     def _load_history(self):
-        """โหลดข้อมูลตอนเริ่มบอท ถ้ามีออเดอร์ 'OPEN' ค้างอยู่ ให้ดึงกลับมาเฝ้าต่อ"""
+        """Loads OPEN or PENDING trades from history on startup"""
         if not os.path.exists(self.history_file):
             with open(self.history_file, 'w') as f:
                 json.dump([], f)
@@ -18,58 +18,81 @@ class VirtualTracker:
             try:
                 with open(self.history_file, 'r') as f:
                     data = json.load(f)
-                    # ดึงเฉพาะไม้ที่ยังไม่จบกลับเข้า Memory
-                    self.active_trades = [t for t in data if t.get('status') == 'OPEN']
+                    # Pull both OPEN and PENDING back to memory
+                    self.active_trades = [t for t in data if t.get('status') in ['OPEN', 'PENDING']]
                     if self.active_trades:
-                        logger.info(f"[SYSTEM] Recovered {len(self.active_trades)} OPEN virtual trades from history.")
+                        logger.info(f"[SYSTEM] Recovered {len(self.active_trades)} virtual trades from history.")
             except Exception as e:
                 logger.error(f"[SYSTEM] Failed to load history: {e}")
         
     def add_trade(self, signal_data):
-        """เพิ่มออเดอร์ใหม่ และเซฟลง JSON ทันที (กัน VPS ดับ)"""
+        """Adds a new trade. LIMIT orders start as PENDING."""
+        is_limit = "LIMIT" in signal_data['type']
+        
         trade = {
             'id': datetime.now().strftime("%Y%m%d%H%M%S"),
             'type': signal_data['type'],
+            'mode': signal_data.get('mode', 'MARKET'),
             'entry': signal_data['entry'],
             'sl': signal_data['sl'],
             'tp': signal_data['tp'],
             'open_time': signal_data['time'],
+            'trigger_time': None,
             'mae': 0.0,
             'mfe': 0.0,
-            'status': 'OPEN'
+            'status': 'PENDING' if is_limit else 'OPEN'
         }
+        
         self.active_trades.append(trade)
-        self._sync_to_file(trade, is_new=True) # Save ทันที
-        log_thinking(f"Virtual Trade Started: {trade['type']} @ {trade['entry']}")
+        self._sync_to_file(trade, is_new=True)
+        log_thinking(f"Virtual Trade Registered: {trade['type']} @ {trade['entry']} ({trade['status']})")
 
     def update(self, current_bid, current_ask):
-        """อัปเดตราคาแบบ Real-time"""
+        """Updates prices. Triggers PENDING orders if hit."""
         closed_trades = []
         
         for trade in self.active_trades:
-            if trade['type'] == "BUY":
-                floating_pips = (current_bid - trade['entry']) * 10 
-                adverse = min(0, floating_pips)
-                favorable = max(0, floating_pips)
+            # 1. Handle Pending Order Activation
+            if trade['status'] == 'PENDING':
+                triggered = False
+                if "BUY LIMIT" in trade['type'] and current_ask <= trade['entry']:
+                    triggered = True
+                elif "SELL LIMIT" in trade['type'] and current_bid >= trade['entry']:
+                    triggered = True
                 
-                if current_bid <= trade['sl']:
-                    self._close_trade(trade, "LOSS", current_bid, closed_trades)
-                elif current_bid >= trade['tp']:
-                    self._close_trade(trade, "WIN", current_bid, closed_trades)
-                    
-            else: # SELL
-                floating_pips = (trade['entry'] - current_ask) * 10
-                adverse = min(0, floating_pips) 
-                favorable = max(0, floating_pips)
-                
-                if current_ask >= trade['sl']:
-                    self._close_trade(trade, "LOSS", current_ask, closed_trades)
-                elif current_ask <= trade['tp']:
-                    self._close_trade(trade, "WIN", current_ask, closed_trades)
+                if triggered:
+                    trade['status'] = 'OPEN'
+                    trade['trigger_time'] = datetime.now().strftime("%H:%M:%S")
+                    self._sync_to_file(trade, is_new=False)
+                    log_thinking(f"[SYSTEM] PENDING {trade['type']} Triggered @ {trade['entry']}")
+                else:
+                    continue # Skip MAE/MFE tracking for pending
 
-            # Update MAE/MFE 
-            trade['mae'] = max(trade['mae'], abs(adverse))
-            trade['mfe'] = max(trade['mfe'], favorable)
+            # 2. Handle Open Order Monitoring
+            if trade['status'] == 'OPEN':
+                if "BUY" in trade['type']:
+                    floating_pips = (current_bid - trade['entry']) * 10 
+                    adverse = min(0, floating_pips)
+                    favorable = max(0, floating_pips)
+                    
+                    if current_bid <= trade['sl']:
+                        self._close_trade(trade, "LOSS", current_bid, closed_trades)
+                    elif current_bid >= trade['tp']:
+                        self._close_trade(trade, "WIN", current_bid, closed_trades)
+                        
+                else: # SELL
+                    floating_pips = (trade['entry'] - current_ask) * 10
+                    adverse = min(0, floating_pips) 
+                    favorable = max(0, floating_pips)
+                    
+                    if current_ask >= trade['sl']:
+                        self._close_trade(trade, "LOSS", current_ask, closed_trades)
+                    elif current_ask <= trade['tp']:
+                        self._close_trade(trade, "WIN", current_ask, closed_trades)
+
+                # Update MAE/MFE 
+                trade['mae'] = max(trade['mae'], abs(adverse))
+                trade['mfe'] = max(trade['mfe'], favorable)
 
         for t in closed_trades:
             if t in self.active_trades:
@@ -78,7 +101,6 @@ class VirtualTracker:
         return closed_trades
 
     def _close_trade(self, trade, result, exit_price, closed_list):
-        """ปิดออเดอร์ และอัปเดตสถานะในไฟล์ JSON"""
         trade['status'] = 'CLOSED'
         trade['result'] = result
         trade['exit_price'] = exit_price
@@ -87,9 +109,9 @@ class VirtualTracker:
         trade['reason'] = self._analyze_exit(trade)
         trade['advice'] = self._get_advice(trade)
         
-        self._sync_to_file(trade, is_new=False) # อัปเดตไฟล์เดิม
+        self._sync_to_file(trade, is_new=False)
         closed_list.append(trade)
-        log_thinking(f"Virtual Trade Closed: {result} with MAE: {trade['mae']:.1f}")
+        log_thinking(f"Virtual Trade Closed: {result} with MAE: {trade['mae']:.1f} pips")
 
     def _analyze_exit(self, trade):
         if trade['result'] == "LOSS" and trade['mfe'] > 10:
@@ -104,7 +126,6 @@ class VirtualTracker:
         return "Strategy working as intended."
 
     def _sync_to_file(self, trade, is_new=False):
-        """ฟังก์ชันเขียน/อัปเดตไฟล์ JSON เพื่อให้ข้อมูลไม่หาย"""
         try:
             with open(self.history_file, 'r') as f:
                 data = json.load(f)
@@ -112,7 +133,6 @@ class VirtualTracker:
             if is_new:
                 data.append(trade)
             else:
-                # หาตัวเดิมแล้วอัปเดต
                 for i, t in enumerate(data):
                     if t['id'] == trade['id']:
                         data[i] = trade

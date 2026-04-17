@@ -72,7 +72,7 @@ class SMCAnalyzer:
 
         pivots = self.detect_pivots(df_m15)
         
-        # [FIX] Use iloc[-2] for strictly CLOSED candle analysis
+        # Strictly CLOSED candle analysis
         last_closed_candle = df_m15.iloc[-2]
         last_closed_price = last_closed_candle['close']
         last_candle_time = int(last_closed_candle['time'].timestamp())
@@ -90,7 +90,7 @@ class SMCAnalyzer:
             bos_bearish = True
             log_thinking(f"[STRUCTURE] Bearish BOS: Candle closed at {last_closed_price} < Pivot {low_pivots[-1]['price']}")
 
-        # [FIX] Sweeps must verify against CLOSED candle values
+        # Sweeps verified against CLOSED candle values
         sweep_bullish = False
         sweep_bearish = False
         if self.pdl and (last_closed_candle['low'] < self.pdl < last_closed_price):
@@ -103,54 +103,67 @@ class SMCAnalyzer:
         fvg_up = df_m15.iloc[-2]['low'] > df_m15.iloc[-4]['high']
         fvg_down = df_m15.iloc[-2]['high'] < df_m15.iloc[-4]['low']
         
-        ob_found = False
-        if bos_bullish and df_m15.iloc[high_pivots[-1]['index']-1]['close'] < df_m15.iloc[high_pivots[-1]['index']-1]['open']:
-            ob_found = True
-        elif bos_bearish and df_m15.iloc[low_pivots[-1]['index']-1]['close'] > df_m15.iloc[low_pivots[-1]['index']-1]['open']:
-            ob_found = True
+        ob_open = None
+        if bos_bullish:
+            # Last down candle before boss
+            ob_open = df_m15.iloc[high_pivots[-1]['index']-1]['open']
+        elif bos_bearish:
+            # Last up candle before boss
+            ob_open = df_m15.iloc[low_pivots[-1]['index']-1]['open']
 
+        # DXY Correlation
+        dxy_trend = self.get_dxy_trend()
+        
+        # Dual Mode Logic
+        execution_mode = "MARKET"
+        signal_type = "NEUTRAL"
+        entry_price = last_closed_price
+        
+        # 1. Market Execution Priority: Sweep
+        if sweep_bullish:
+            signal_type = "BUY"
+            execution_mode = "MARKET"
+        elif sweep_bearish:
+            signal_type = "SELL"
+            execution_mode = "MARKET"
+        
+        # 2. Limit Order Priority: BOS with valid OB
+        elif (bos_bullish or bos_bearish) and ob_open:
+            # Add 2-point front-running buffer (0.02 for Gold)
+            buffer = 0.02
+            entry_price = ob_open + buffer if bos_bullish else ob_open - buffer
+            signal_type = "BUY LIMIT" if bos_bullish else "SELL LIMIT"
+            execution_mode = "LIMIT"
+
+        # Confluence Scoring
         score = 0
         confluences = []
-        signal_type = "NEUTRAL"
-
-        if sweep_bullish or sweep_bearish:
-            score += 3
-            confluences.append("Liquidity Sweep")
-            signal_type = "BUY" if sweep_bullish else "SELL"
+        if sweep_bullish or sweep_bearish: score += 3; confluences.append("Liquidity Sweep")
+        if bos_bullish or bos_bearish: score += 3; confluences.append("BOS Structure")
+        if fvg_up or fvg_down: score += 2; confluences.append("FVG Gap")
+        if ob_open: score += 2; confluences.append("Order Block")
         
-        if bos_bullish or bos_bearish:
-            score += 3
-            confluences.append("BOS Structure")
-            if signal_type == "NEUTRAL": signal_type = "BUY" if bos_bullish else "SELL"
-            
-        if fvg_up or fvg_down:
-            score += 2
-            confluences.append("FVG Gap")
-            
-        if ob_found:
-            score += 2
-            confluences.append("Order Block")
-
-        dxy_trend = self.get_dxy_trend()
-        if (signal_type == "BUY" and dxy_trend == 1) or (signal_type == "SELL" and dxy_trend == -1):
+        if (signal_type.startswith("BUY") and dxy_trend == 1) or (signal_type.startswith("SELL") and dxy_trend == -1):
             score -= 2
-            logger.info(f"[CORRELATION] Score Penalty (-2): DXY Trend opposes {signal_type} signal.")
             confluences.append("⚠️ DXY Mismatch")
         elif dxy_trend != 0:
             confluences.append("DXY Verified")
 
         if score >= 6 and signal_type != "NEUTRAL":
-            if score >= 10: 
-                log_thinking(f"🏆 [BRAIN] 10/10 AI Score achieved for {signal_type}")
-            
             atr = (df_m15['high'] - df_m15['low']).rolling(14).mean().iloc[-1]
-            sl = last_closed_price - (atr * 2) if signal_type == "BUY" else last_closed_price + (atr * 2)
-            tp = last_closed_price + (atr * 4) if signal_type == "BUY" else last_closed_price - (atr * 4)
+            sl = entry_price - (atr * 2) if signal_type.startswith("BUY") else entry_price + (atr * 2)
+            tp = entry_price + (atr * 4) if signal_type.startswith("BUY") else entry_price - (atr * 4)
 
             return {
-                "type": signal_type, "entry": last_closed_price, "sl": sl, "tp": tp,
-                "score": score, "strategy": " + ".join(confluences),
-                "candle_time": last_candle_time, "time": datetime.now(self.timezone).strftime("%H:%M:%S"),
+                "type": signal_type,
+                "mode": execution_mode,
+                "entry": entry_price,
+                "sl": sl,
+                "tp": tp,
+                "score": score,
+                "strategy": " + ".join(confluences),
+                "candle_time": last_candle_time,
+                "time": datetime.now(self.timezone).strftime("%H:%M:%S"),
                 "news_active": False
             }
         
