@@ -57,6 +57,39 @@ class SMCAnalyzer:
         swings = df[(df['is_high']) | (df['is_low'])].copy()
         return swings
 
+    def find_dxy_symbol(self):
+        """Tries to find the DXY/USDX symbol"""
+        symbols = mt5.symbols_get()
+        for sym in symbols:
+            if sym.name.upper() in ["DXY", "USDX", "USDOLLAR"]:
+                return sym.name
+        return None
+
+    def get_dxy_trend(self):
+        """Returns 1 for Uptrend, -1 for Downtrend, 0 for Neutral"""
+        dxy = self.find_dxy_symbol()
+        if not dxy:
+            logger.warning("DXY/USDX symbol not found for correlation check.")
+            return 0
+        
+        rates = mt5.copy_rates_from_pos(dxy, mt5.TIMEFRAME_M15, 0, 3)
+        if rates is None or len(rates) < 3:
+            return 0
+        
+        # Simple trend: Close > Open of the cluster or higher highs
+        if rates[-1]['close'] > rates[0]['open']:
+            return 1 # Bullish
+        elif rates[-1]['close'] < rates[0]['open']:
+            return -1 # Bearish
+        return 0
+
+    def check_news_active(self):
+        """Placeholder for News check logic"""
+        # In production, this would query an economic calendar API
+        # Return True if high-impact news is within +/- 30 mins
+        import os
+        return os.getenv("NEWS_ACTIVE_DEBUG", "FALSE").upper() == "TRUE"
+
     def analyze(self):
         """Main analysis logic"""
         log_thinking("Starting full analysis cycle...")
@@ -65,16 +98,16 @@ class SMCAnalyzer:
         df_m15 = self.fetch_data(mt5.TIMEFRAME_M15, 100)
         if df_m15 is None: return None
         
+        last_candle_time = int(df_m15.iloc[-1]['time'].timestamp())
+        
         # 2. Basic Analysis
         fvgs = self.detect_fvg(df_m15)
         swings = self.detect_structures(df_m15)
         kill_zone = self.is_kill_zone()
+        dxy_trend = self.get_dxy_trend()
+        news_active = self.check_news_active()
         
         last_price = df_m15.iloc[-1]['close']
-        
-        # Placeholder for Scoring and Entry Detection
-        # In a real scenario, we'd check for CHoCH/BOS on M15 and MSS on M1
-        # For the prototype, we evaluate confluences
         
         score = 0
         reasons = []
@@ -87,25 +120,40 @@ class SMCAnalyzer:
             score += 2
             reasons.append(f"Active {kill_zone}")
             
-        # Simplified Logic for Signal Generation
-        if score >= 5:
-            signal_type = fvgs[-1]['type'] if fvgs else "NEUTRAL"
+        # Simplified signal type based on FVG
+        signal_type = "NEUTRAL"
+        if fvgs:
+            signal_type = fvgs[-1]['type']
             
-            # Suggest SL/TP based on ATR or recent swings
+        # 3. DXY Correlation Check
+        if signal_type == "BULLISH" and dxy_trend == 1:
+            score -= 2
+            reasons.append("⚠️ DXY Correlation Mismatch (USD Strong)")
+        elif signal_type == "BEARISH" and dxy_trend == -1:
+            score -= 2
+            reasons.append("⚠️ DXY Correlation Mismatch (USD Weak)")
+        elif dxy_trend != 0:
+            reasons.append(f"DXY Trend Confirmed ({'Bullish' if dxy_trend==1 else 'Bearish'})")
+
+        # 4. Signal Generation
+        if score >= 5 and signal_type != "NEUTRAL":
+            # Suggest SL/TP based on ATR
             atr = (df_m15['high'] - df_m15['low']).rolling(14).mean().iloc[-1]
-            sl = last_price - (atr * 2) if signal_type == "BUY" else last_price + (atr * 2)
-            tp = last_price + (atr * 4) if signal_type == "BUY" else last_price - (atr * 4)
+            sl = last_price - (atr * 2) if signal_type == "BULLISH" else last_price + (atr * 2)
+            tp = last_price + (atr * 4) if signal_type == "BULLISH" else last_price - (atr * 4)
             
             signal = {
-                'type': signal_type,
+                'type': "BUY" if signal_type == "BULLISH" else "SELL",
                 'entry': last_price,
                 'sl': sl,
                 'tp': tp,
                 'score': score,
                 'strategy': " + ".join(reasons),
-                'time': datetime.now(self.timezone).strftime("%H:%M:%S")
+                'time': datetime.now(self.timezone).strftime("%H:%M:%S"),
+                'candle_time': last_candle_time,
+                'news_active': news_active
             }
-            log_thinking(f"Signal Generated: {signal_type} with Score {score}")
+            log_thinking(f"Signal Generated: {signal['type']} with Score {score} (Candle: {last_candle_time})")
             return signal
             
         return None

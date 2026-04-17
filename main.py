@@ -49,39 +49,63 @@ def main():
     tracker = VirtualTracker()
     notifier = TelegramNotifier()
     
-    last_analysis_time = 0
-    analysis_interval = 60 # Check for new signals every 60 seconds (or on candle close)
+    last_candle_id = None # To prevent duplicate signals on the same candle
+    last_heartbeat_time = 0
 
     try:
         while True:
+            # 0. Heartbeat & Self-Healing
+            current_time = time.time()
+            if current_time - last_heartbeat_time > 10: # Check connection every 10s
+                terminal_info = mt5.terminal_info()
+                if not terminal_info or not terminal_info.connected:
+                    logger.warning("MT5 Connection lost! Attempting self-healing...")
+                    mt5.shutdown()
+                    time.sleep(5)
+                    if mt5.initialize():
+                        logger.info("MT5 successfully re-initialized.")
+                    else:
+                        logger.error("Auto-initialization failed.")
+                last_heartbeat_time = current_time
+
             # A. Get Live Prices for Tracker
             tick = mt5.symbol_info_tick(gold_symbol)
             if tick:
                 closed_trades = tracker.update(tick.bid, tick.ask)
                 for trade in closed_trades:
-                    # Notify about trade outcome
+                    # Risk Calculation for 0.1 Lot on a $30 Account
+                    # XAUUSD 0.1 Lot = 10 Ounces. 1 point move = $10.
+                    # Price difference in points: abs(entry - exit)
+                    # Loss = pips * 0.1 * lot_multiplier? No, let's use the formula:
+                    # Risk = abs(entry - sl) * 0.1 * 100? 
+                    # Actually, if price goes from 2000 to 1999, loss for 0.1 lot is $10.
+                    # Lot size 0.1 is 10 units. 1 unit move = $10.
+                    
                     exit_data = {
                         'result': trade['result'],
                         'pips': (trade['exit_price'] - trade['entry']) * 10 if trade['type'] == "BUY" else (trade['entry'] - trade['exit_price']) * 10,
                         'mae': trade['mae'],
                         'mfe': trade['mfe'],
                         'reason': trade['reason'],
-                        'advice': trade['advice']
+                        'advice': trade['advice'],
+                        'entry': trade['entry'],
+                        'sl': trade['sl']
                     }
                     notifier.send_exit_alert(exit_data)
             
             # B. Periodic Analysis for New Signals
-            current_time = time.time()
-            if current_time - last_analysis_time > analysis_interval:
-                signal = analyzer.analyze()
-                if signal:
-                    # Prevent duplicate signals (basic check - could be improved with state)
-                    # For now, we only notify if score is high
+            signal = analyzer.analyze()
+            if signal:
+                candle_id = signal.get('candle_time')
+                if candle_id != last_candle_id:
                     if signal['score'] >= 7: # High fidelity threshold
                         notifier.send_signal(signal)
                         tracker.add_trade(signal)
-                
-                last_analysis_time = current_time
+                        last_candle_id = candle_id
+                        log_thinking(f"Signal sent for candle {candle_id}")
+                else:
+                    # Already sent for this candle
+                    pass
 
             # Small sleep to prevent high CPU usage
             time.sleep(1)
