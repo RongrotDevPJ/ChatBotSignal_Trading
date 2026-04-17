@@ -14,6 +14,7 @@ class SMCAnalyzer:
         self.pdh = None
         self.pdl = None
         self.last_daily_sync_date = None
+        self.last_logged_candle_time = None
 
     def _find_symbol(self, default, keys):
         symbols = mt5.symbols_get()
@@ -93,12 +94,28 @@ class SMCAnalyzer:
         # Sweeps verified against CLOSED candle values
         sweep_bullish = False
         sweep_bearish = False
-        if self.pdl and (last_closed_candle['low'] < self.pdl < last_closed_price):
-            sweep_bullish = True
-            log_thinking(f"[LIQUIDITY] Bullish Sweep: Price took out PDL {self.pdl} and closed back.")
-        elif self.pdh and (last_closed_candle['high'] > self.pdh > last_closed_price):
-            sweep_bearish = True
-            log_thinking(f"[LIQUIDITY] Bearish Sweep: Price swept PDH {self.pdh} and rejected.")
+        
+        # Logging structure/liquidity findings ONLY ONCE per candle
+        if last_candle_time != self.last_logged_candle_time:
+            if bos_bullish:
+                log_thinking(f"[STRUCTURE] Bullish BOS: Candle closed at {last_closed_price} > Pivot {high_pivots[-1]['price']}")
+            elif bos_bearish:
+                log_thinking(f"[STRUCTURE] Bearish BOS: Candle closed at {last_closed_price} < Pivot {low_pivots[-1]['price']}")
+
+            if self.pdl and (last_closed_candle['low'] < self.pdl < last_closed_price):
+                sweep_bullish = True
+                log_thinking(f"[LIQUIDITY] Bullish Sweep: Price took out PDL {self.pdl} and closed back.")
+            elif self.pdh and (last_closed_candle['high'] > self.pdh > last_closed_price):
+                sweep_bearish = True
+                log_thinking(f"[LIQUIDITY] Bearish Sweep: Price swept PDH {self.pdh} and rejected.")
+            
+            self.last_logged_candle_time = last_candle_time
+        else:
+            # Re-detect sweeps for internal logic without re-logging
+            if self.pdl and (last_closed_candle['low'] < self.pdl < last_closed_price):
+                sweep_bullish = True
+            elif self.pdh and (last_closed_candle['high'] > self.pdh > last_closed_price):
+                sweep_bearish = True
 
         fvg_up = df_m15.iloc[-2]['low'] > df_m15.iloc[-4]['high']
         fvg_down = df_m15.iloc[-2]['high'] < df_m15.iloc[-4]['low']

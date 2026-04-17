@@ -91,12 +91,38 @@ def main():
                 signal = analyzer.analyze()
                 if signal:
                     candle_id = signal.get('candle_time')
-                    if candle_id != last_candle_id:
-                        if signal['score'] >= 7:
+                    if signal['score'] >= 6:
+                        direction = "BUY" if "BUY" in signal['type'] else "SELL"
+                        
+                        # Find existing trades with same direction
+                        active_same_direction = [
+                            t for t in tracker.active_trades 
+                            if direction in t['type'] and t['status'] in ['PENDING', 'OPEN']
+                        ]
+
+                        is_new_signal = False
+
+                        # Scenario 1: New signal is MARKET
+                        if signal['mode'] == "MARKET":
+                            # Cancel ALL existing PENDING orders on Market execution
+                            tracker.cancel_all_pending()
+                            is_new_signal = True
+
+                        # Scenario 2: New signal is LIMIT
+                        elif signal['mode'] == "LIMIT":
+                            # Only execute if no active trades in this direction
+                            if not active_same_direction:
+                                is_new_signal = True
+                            else:
+                                if candle_id != last_candle_id:
+                                    logger.debug(f"[SYSTEM] Skipped duplicate {direction} LIMIT order for candle {candle_id}. Trade already active.")
+
+                        # Dispatch if logic clears
+                        if is_new_signal and (candle_id != last_candle_id or signal['mode'] == "MARKET"):
                             notifier.send_signal(signal)
                             tracker.add_trade(signal)
                             last_candle_id = candle_id
-                            logger.info(f"[SYSTEM] Signal dispatched for candle {candle_id}")
+                            logger.info(f"[SYSTEM] Signal dispatched for candle {candle_id} ({signal['mode']} {direction})")
                 
                 last_analysis_time = current_time
 

@@ -125,6 +125,16 @@ class VirtualTracker:
             return "Consider trailing stop or wider SL based on recent OB."
         return "Strategy working as intended."
 
+    def cancel_all_pending(self):
+        """Cancels all currently pending trades in history."""
+        for trade in self.active_trades[:]: # Use slice to allow removal if needed
+            if trade['status'] == 'PENDING':
+                trade['status'] = 'CANCELLED'
+                trade['close_time'] = datetime.now().strftime("%H:%M:%S")
+                self._sync_to_file(trade, is_new=False)
+                self.active_trades.remove(trade)
+                log_thinking(f"[SYSTEM] Virtual PENDING order {trade['id']} has been CANCELLED.")
+
     def _sync_to_file(self, trade, is_new=False):
         try:
             with open(self.history_file, 'r') as f:
