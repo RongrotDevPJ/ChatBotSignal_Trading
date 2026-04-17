@@ -1,0 +1,19 @@
+# Environment variables
+.env
+
+# Logs and Data
+logs/
+trade_history.json
+system_analysis.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# IDEs
+.vscode/
+.idea/
