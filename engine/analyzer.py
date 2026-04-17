@@ -10,7 +10,7 @@ class SMCAnalyzer:
         self.dxy = self._find_symbol("DXY", ["DXY", "USDX", "DX", "USDOLLAR"])
         self.timezone = pytz.timezone("Asia/Bangkok")
         
-        # Daily Context Caching
+        # Daily Context Caching (PDH/PDL)
         self.pdh = None
         self.pdl = None
         self.last_daily_sync_date = None
@@ -25,27 +25,22 @@ class SMCAnalyzer:
         return default
 
     def sync_daily_data(self):
-        """Fetches PDH/PDL only once per day or upon init"""
         now_date = datetime.now(self.timezone).date()
-        if self.last_daily_sync_date == now_date:
-            return # Already cached
+        if self.last_daily_sync_date == now_date and self.pdh is not None:
+            return 
 
-        logger.info("[SYSTEM] Syncing Daily Context (PDH/PDL)...")
-        # Fetch last 2 daily bars (Previous day is index 1)
         rates = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_D1, 1, 1)
         if rates is not None and len(rates) > 0:
             self.pdh = float(rates[0]['high'])
             self.pdl = float(rates[0]['low'])
             self.last_daily_sync_date = now_date
-            log_thinking(f"[LIQUIDITY] PDH Cached: {self.pdh} | PDL Cached: {self.pdl}")
+            log_thinking(f"[LIQUIDITY] Cached PDH: {self.pdh} | PDL: {self.pdl}")
         else:
-            logger.error("[SYSTEM] Failed to fetch daily data for caching.")
+            logger.error("[SYSTEM] Failed to sync Daily context data.")
 
-    def fetch_data(self, timeframe, count=100):
+    def fetch_data(self, timeframe, count=200):
         rates = mt5.copy_rates_from_pos(self.symbol, timeframe, 0, count)
-        if rates is None:
-            logger.error(f"[SYSTEM] Failed to fetch data for {self.symbol}")
-            return None
+        if rates is None: return None
         df = pd.DataFrame(rates)
         df['time'] = pd.to_datetime(df['time'], unit='s')
         return df
@@ -57,67 +52,63 @@ class SMCAnalyzer:
         return 1 if rates[-1]['close'] > rates[0]['open'] else -1
 
     def detect_pivots(self, df):
-        """Detects Swing Highs and Lows using a 5-candle fractal (window=2)"""
         pivots = []
         for i in range(2, len(df) - 2):
-            # Swing High
             if df['high'].iloc[i] > df['high'].iloc[i-1] and df['high'].iloc[i] > df['high'].iloc[i-2] and \
                df['high'].iloc[i] > df['high'].iloc[i+1] and df['high'].iloc[i] > df['high'].iloc[i+2]:
-                pivots.append({'type': 'HIGH', 'price': df['high'].iloc[i], 'index': i, 'time': df['time'].iloc[i]})
+                pivots.append({'type': 'HIGH', 'price': df['high'].iloc[i], 'index': i})
             
-            # Swing Low
             if df['low'].iloc[i] < df['low'].iloc[i-1] and df['low'].iloc[i] < df['low'].iloc[i-2] and \
                df['low'].iloc[i] < df['low'].iloc[i+1] and df['low'].iloc[i] < df['low'].iloc[i+2]:
-                pivots.append({'type': 'LOW', 'price': df['low'].iloc[i], 'index': i, 'time': df['time'].iloc[i]})
+                pivots.append({'type': 'LOW', 'price': df['low'].iloc[i], 'index': i})
         return pivots
 
     def analyze(self):
-        log_thinking("Scanning M15 Market Structure...")
         self.sync_daily_data()
+        df_m15 = self.fetch_data(mt5.TIMEFRAME_M15, 200)
         
-        df = self.fetch_data(mt5.TIMEFRAME_M15, 200)
-        if df is None: return None
+        if df_m15 is None or df_m15.empty or len(df_m15) < 10:
+            return None
+
+        pivots = self.detect_pivots(df_m15)
         
-        last_candle_time = int(df.iloc[-1]['time'].timestamp())
-        pivots = self.detect_pivots(df)
+        # [FIX] Use iloc[-2] for strictly CLOSED candle analysis
+        last_closed_candle = df_m15.iloc[-2]
+        last_closed_price = last_closed_candle['close']
+        last_candle_time = int(last_closed_candle['time'].timestamp())
         
-        # 1. Structure Check (Mechanical BOS/CHoCH - Close Based)
-        last_price = df.iloc[-1]['close']
-        recent_highs = [p for p in pivots if p['type'] == 'HIGH']
-        recent_lows = [p for p in pivots if p['type'] == 'LOW']
+        high_pivots = [p for p in pivots if p['type'] == 'HIGH']
+        low_pivots = [p for p in pivots if p['type'] == 'LOW']
         
         bos_bullish = False
         bos_bearish = False
-        if recent_highs and last_price > recent_highs[-1]['price']:
+        
+        if high_pivots and last_closed_price > high_pivots[-1]['price']:
             bos_bullish = True
-            log_thinking(f"[STRUCTURE] Bullish BOS detected at {last_price} > Pivot {recent_highs[-1]['price']}")
-        elif recent_lows and last_price < recent_lows[-1]['price']:
+            log_thinking(f"[STRUCTURE] Bullish BOS: Candle closed at {last_closed_price} > Pivot {high_pivots[-1]['price']}")
+        elif low_pivots and last_closed_price < low_pivots[-1]['price']:
             bos_bearish = True
-            log_thinking(f"[STRUCTURE] Bearish BOS detected at {last_price} < Pivot {recent_lows[-1]['price']}")
+            log_thinking(f"[STRUCTURE] Bearish BOS: Candle closed at {last_closed_price} < Pivot {low_pivots[-1]['price']}")
 
-        # 2. Liquidity Sweep Detection
+        # [FIX] Sweeps must verify against CLOSED candle values
         sweep_bullish = False
         sweep_bearish = False
-        if self.pdl and (df.iloc[-1]['low'] < self.pdl < df.iloc[-1]['close']):
+        if self.pdl and (last_closed_candle['low'] < self.pdl < last_closed_price):
             sweep_bullish = True
-            log_thinking(f"[LIQUIDITY] Bullish Sweep detected: Price dipped below PDL {self.pdl} and closed back.")
-        if self.pdh and (df.iloc[-1]['high'] > self.pdh > df.iloc[-1]['close']):
+            log_thinking(f"[LIQUIDITY] Bullish Sweep: Price took out PDL {self.pdl} and closed back.")
+        elif self.pdh and (last_closed_candle['high'] > self.pdh > last_closed_price):
             sweep_bearish = True
-            log_thinking(f"[LIQUIDITY] Bearish Sweep detected: Price swept beyond PDH {self.pdh} and closed back.")
+            log_thinking(f"[LIQUIDITY] Bearish Sweep: Price swept PDH {self.pdh} and rejected.")
 
-        # 3. FVG and Order Block (OB)
-        # Simplified OB: Last candle of opposite color before BOS
-        bullish_ob_detected = False
-        bearish_ob_detected = False
-        if bos_bullish and df.iloc[recent_highs[-1]['index']-1]['close'] < df.iloc[recent_highs[-1]['index']-1]['open']:
-            bullish_ob_detected = True # Last down candle
-        if bos_bearish and df.iloc[recent_lows[-1]['index']-1]['close'] > df.iloc[recent_lows[-1]['index']-1]['open']:
-            bearish_ob_detected = True # Last up candle
+        fvg_up = df_m15.iloc[-2]['low'] > df_m15.iloc[-4]['high']
+        fvg_down = df_m15.iloc[-2]['high'] < df_m15.iloc[-4]['low']
+        
+        ob_found = False
+        if bos_bullish and df_m15.iloc[high_pivots[-1]['index']-1]['close'] < df_m15.iloc[high_pivots[-1]['index']-1]['open']:
+            ob_found = True
+        elif bos_bearish and df_m15.iloc[low_pivots[-1]['index']-1]['close'] > df_m15.iloc[low_pivots[-1]['index']-1]['open']:
+            ob_found = True
 
-        fvg_up = df.iloc[-1]['low'] > df.iloc[-3]['high']
-        fvg_down = df.iloc[-1]['high'] < df.iloc[-3]['low']
-
-        # 4. Scoring Algorithm
         score = 0
         confluences = []
         signal_type = "NEUTRAL"
@@ -129,44 +120,37 @@ class SMCAnalyzer:
         
         if bos_bullish or bos_bearish:
             score += 3
-            confluences.append(f"{'Bullish' if bos_bullish else 'Bearish'} BOS")
+            confluences.append("BOS Structure")
             if signal_type == "NEUTRAL": signal_type = "BUY" if bos_bullish else "SELL"
-        
+            
         if fvg_up or fvg_down:
             score += 2
-            confluences.append("FVG Detected")
-
-        if bullish_ob_detected or bearish_ob_detected:
+            confluences.append("FVG Gap")
+            
+        if ob_found:
             score += 2
-            confluences.append("Order Block Found")
+            confluences.append("Order Block")
 
-        # DXY Correlation
         dxy_trend = self.get_dxy_trend()
         if (signal_type == "BUY" and dxy_trend == 1) or (signal_type == "SELL" and dxy_trend == -1):
             score -= 2
-            logger.info(f"[CORRELATION] DXY Mismatch. USD Strength opposes {signal_type}.")
-            confluences.append("⚠️ DXY Opposing")
+            logger.info(f"[CORRELATION] Score Penalty (-2): DXY Trend opposes {signal_type} signal.")
+            confluences.append("⚠️ DXY Mismatch")
         elif dxy_trend != 0:
-            confluences.append("DXY Confirmed")
+            confluences.append("DXY Verified")
 
         if score >= 6 and signal_type != "NEUTRAL":
-            # Extra verification for 10/10
-            if score >= 10: log_thinking(f"🏆 10/10 AI SIGNAL DETECTED: {signal_type}")
+            if score >= 10: 
+                log_thinking(f"🏆 [BRAIN] 10/10 AI Score achieved for {signal_type}")
             
-            entry = df.iloc[-1]['close']
-            atr = (df['high'] - df['low']).rolling(14).mean().iloc[-1]
-            sl = entry - (atr * 2) if signal_type == "BUY" else entry + (atr * 2)
-            tp = entry + (atr * 4) if signal_type == "BUY" else entry - (atr * 4)
+            atr = (df_m15['high'] - df_m15['low']).rolling(14).mean().iloc[-1]
+            sl = last_closed_price - (atr * 2) if signal_type == "BUY" else last_closed_price + (atr * 2)
+            tp = last_closed_price + (atr * 4) if signal_type == "BUY" else last_closed_price - (atr * 4)
 
             return {
-                "type": signal_type,
-                "entry": entry,
-                "sl": sl,
-                "tp": tp,
-                "score": score,
-                "strategy": " + ".join(confluences),
-                "candle_time": last_candle_time,
-                "time": datetime.now(self.timezone).strftime("%H:%M:%S"),
+                "type": signal_type, "entry": last_closed_price, "sl": sl, "tp": tp,
+                "score": score, "strategy": " + ".join(confluences),
+                "candle_time": last_candle_time, "time": datetime.now(self.timezone).strftime("%H:%M:%S"),
                 "news_active": False
             }
         

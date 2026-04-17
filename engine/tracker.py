@@ -10,12 +10,23 @@ class VirtualTracker:
         self._load_history()
 
     def _load_history(self):
+        """โหลดข้อมูลตอนเริ่มบอท ถ้ามีออเดอร์ 'OPEN' ค้างอยู่ ให้ดึงกลับมาเฝ้าต่อ"""
         if not os.path.exists(self.history_file):
             with open(self.history_file, 'w') as f:
                 json.dump([], f)
+        else:
+            try:
+                with open(self.history_file, 'r') as f:
+                    data = json.load(f)
+                    # ดึงเฉพาะไม้ที่ยังไม่จบกลับเข้า Memory
+                    self.active_trades = [t for t in data if t.get('status') == 'OPEN']
+                    if self.active_trades:
+                        logger.info(f"[SYSTEM] Recovered {len(self.active_trades)} OPEN virtual trades from history.")
+            except Exception as e:
+                logger.error(f"[SYSTEM] Failed to load history: {e}")
         
     def add_trade(self, signal_data):
-        """Adds a new virtual trade from a signal"""
+        """เพิ่มออเดอร์ใหม่ และเซฟลง JSON ทันที (กัน VPS ดับ)"""
         trade = {
             'id': datetime.now().strftime("%Y%m%d%H%M%S"),
             'type': signal_data['type'],
@@ -23,29 +34,24 @@ class VirtualTracker:
             'sl': signal_data['sl'],
             'tp': signal_data['tp'],
             'open_time': signal_data['time'],
-            'mae': 0.0, # Max Adverse Excursion (pips)
-            'mfe': 0.0, # Max Favorable Excursion (pips)
+            'mae': 0.0,
+            'mfe': 0.0,
             'status': 'OPEN'
         }
         self.active_trades.append(trade)
+        self._sync_to_file(trade, is_new=True) # Save ทันที
         log_thinking(f"Virtual Trade Started: {trade['type']} @ {trade['entry']}")
 
     def update(self, current_bid, current_ask):
-        """Updates active trades with current market prices"""
+        """อัปเดตราคาแบบ Real-time"""
         closed_trades = []
         
         for trade in self.active_trades:
-            # For BUY: Adverse is Bid falling below entry. Favorable is Bid rising above entry.
-            # For SELL: Adverse is Ask rising above entry. Favorable is Ask falling below entry.
-            
             if trade['type'] == "BUY":
-                floating_pips = (current_bid - trade['entry']) * 10 # Assuming Gold 2 decimals (10 points = 1 pip)
-                # Note: MT5 Gold usually has 2 decimals, so 0.01 = 1 point. 0.10 = 1 pip.
-                # Correcting: Gold 1900.00 -> 1900.01 is 1 point. 10 points = 1 pip usually.
+                floating_pips = (current_bid - trade['entry']) * 10 
                 adverse = min(0, floating_pips)
                 favorable = max(0, floating_pips)
                 
-                # Check Exit
                 if current_bid <= trade['sl']:
                     self._close_trade(trade, "LOSS", current_bid, closed_trades)
                 elif current_bid >= trade['tp']:
@@ -53,24 +59,18 @@ class VirtualTracker:
                     
             else: # SELL
                 floating_pips = (trade['entry'] - current_ask) * 10
-                adverse = min(0, (trade['entry'] - current_ask) * 10) # Ask rising makes floating pips more negative
-                # Wait, logic check: 
-                # BUY: current_bid - entry. If bid=10, entry=12, pips=-2. MAE should be 2.
-                # SELL: entry - current_ask. If ask=14, entry=12, pips=-2. MAE should be 2.
-                
+                adverse = min(0, floating_pips) 
                 favorable = max(0, floating_pips)
                 
-                # Check Exit
                 if current_ask >= trade['sl']:
                     self._close_trade(trade, "LOSS", current_ask, closed_trades)
                 elif current_ask <= trade['tp']:
                     self._close_trade(trade, "WIN", current_ask, closed_trades)
 
-            # Update MAE/MFE (Stored as positive pips for deviation)
-            trade['mae'] = max(trade['mae'], abs(min(0, floating_pips)))
+            # Update MAE/MFE 
+            trade['mae'] = max(trade['mae'], abs(adverse))
             trade['mfe'] = max(trade['mfe'], favorable)
 
-        # Remove closed trades
         for t in closed_trades:
             if t in self.active_trades:
                 self.active_trades.remove(t)
@@ -78,22 +78,21 @@ class VirtualTracker:
         return closed_trades
 
     def _close_trade(self, trade, result, exit_price, closed_list):
+        """ปิดออเดอร์ และอัปเดตสถานะในไฟล์ JSON"""
         trade['status'] = 'CLOSED'
         trade['result'] = result
         trade['exit_price'] = exit_price
         trade['close_time'] = datetime.now().strftime("%H:%M:%S")
         
-        # Simple Analysis
         trade['reason'] = self._analyze_exit(trade)
         trade['advice'] = self._get_advice(trade)
         
-        # Persistence
-        self._save_to_history(trade)
+        self._sync_to_file(trade, is_new=False) # อัปเดตไฟล์เดิม
         closed_list.append(trade)
         log_thinking(f"Virtual Trade Closed: {result} with MAE: {trade['mae']:.1f}")
 
     def _analyze_exit(self, trade):
-        if trade['result'] == "LOSS" and trade['mfe'] > 10: # If it was up 10 pips before losing
+        if trade['result'] == "LOSS" and trade['mfe'] > 10:
             return "Price was in profit but reversed. Possibly Liquidity Grab or News."
         if trade['result'] == "LOSS" and trade['mae'] > 0:
             return "Direct hit to SL. Structure was likely invalidated."
@@ -104,12 +103,22 @@ class VirtualTracker:
             return "Consider trailing stop or wider SL based on recent OB."
         return "Strategy working as intended."
 
-    def _save_to_history(self, trade):
+    def _sync_to_file(self, trade, is_new=False):
+        """ฟังก์ชันเขียน/อัปเดตไฟล์ JSON เพื่อให้ข้อมูลไม่หาย"""
         try:
-            with open(self.history_file, 'r+') as f:
+            with open(self.history_file, 'r') as f:
                 data = json.load(f)
+            
+            if is_new:
                 data.append(trade)
-                f.seek(0)
+            else:
+                # หาตัวเดิมแล้วอัปเดต
+                for i, t in enumerate(data):
+                    if t['id'] == trade['id']:
+                        data[i] = trade
+                        break
+                        
+            with open(self.history_file, 'w') as f:
                 json.dump(data, f, indent=4)
         except Exception as e:
-            logger.error(f"Failed to save trade history: {e}")
+            logger.error(f"Failed to sync trade history: {e}")

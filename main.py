@@ -88,7 +88,7 @@ def main():
                     if candle_id != last_candle_id:
                         if signal['score'] >= 7:
                             notifier.send_signal(signal)
-                            tracker.track(signal)
+                            tracker.add_trade(signal)
                             last_candle_id = candle_id
                             logger.info(f"[SYSTEM] Signal dispatched for candle {candle_id}")
                 
