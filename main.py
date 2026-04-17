@@ -7,6 +7,7 @@ from engine.tracker import VirtualTracker
 from utils.notifier import TelegramNotifier
 from utils.logger import logger, log_thinking
 import pytz
+from datetime import datetime
 from utils.reporter import WeeklyReporter
 
 # Load environment variables
