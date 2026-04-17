@@ -6,6 +6,8 @@ from engine.analyzer import SMCAnalyzer
 from engine.tracker import VirtualTracker
 from utils.notifier import TelegramNotifier
 from utils.logger import logger, log_thinking
+import pytz
+from utils.reporter import WeeklyReporter
 
 # Load environment variables
 load_dotenv()
@@ -32,6 +34,9 @@ def main():
     # 3. Initialize Components
     tracker = VirtualTracker()
     notifier = TelegramNotifier()
+    reporter = WeeklyReporter()
+    last_reported_week = -1
+    bkk_tz = pytz.timezone("Asia/Bangkok")
     
     # 4. Startup Notification
     startup_ctx = {
@@ -93,6 +98,17 @@ def main():
                             logger.info(f"[SYSTEM] Signal dispatched for candle {candle_id}")
                 
                 last_analysis_time = current_time
+
+            # C. Zero-CPU Weekly Reporter (Friday 23:50 BKK Time)
+            bkk_now = datetime.now(bkk_tz)
+            current_week = bkk_now.isocalendar()[1]
+            
+            # Check if it's Friday (4) and 23:50+
+            if bkk_now.weekday() == 4 and bkk_now.hour == 23 and bkk_now.minute >= 50:
+                if current_week != last_reported_week:
+                    logger.info("[SYSTEM] Triggering Weekly Summary Report...")
+                    reporter.generate_and_send()
+                    last_reported_week = current_week
 
             # 1s Pulse to keep Tracker precise and CPU low
             time.sleep(1)
