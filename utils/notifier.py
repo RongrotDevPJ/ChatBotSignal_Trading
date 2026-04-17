@@ -11,97 +11,66 @@ class TelegramNotifier:
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.base_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
 
-    def calculate_risk(self, entry, sl):
-        """Calculates risk for a 0.1 Lot (Cent Account) on a $30 balance"""
-        # XAUUSD 0.1 Lot = 10 Ounces. 1 point move = $10.
-        # But if it's a Cent Account, 0.1 Lot might be different.
-        # User specified "0.1 Lot (Cent Account)" for $30. 
-        # Usually 0.1 Lot on Cent is 0.001 Standard (~1.0 oz?).
-        # Let's assume 0.1 Lot CENT = $0.10 risk per 1.00 move (100 points/10 pips).
-        # Actually, let's use the most common Cent lot logic: 1.0 Cent Lot = 1% of Standard.
-        # 0.1 Cent Lot = 0.001 Standard.
-        # Risk = abs(entry - sl) * LotSize * 100?
-        # Let's stick to the prompt's implied scale: $1 risk for $30 is reasonable.
-        
+    def calculate_lot_recommendation(self, entry, sl, target_risk=1.0):
+        """Calculates lot size to risk exactly $1.00"""
         price_diff = abs(entry - sl)
-        # Using a common multiplier for Gold: 1.0 Standard Lot = $100/point.
-        # 0.1 Cent Lot = $0.10/point?
-        potential_loss = price_diff * 0.1 # This assumes 0.1 Cent Lot risks $0.10 per point.
-        risk_percent = (potential_loss / 30) * 100
+        if price_diff <= 0: return 0.01, 0, 0
+        
+        # SL in Pips (Gold 1.00 points = 10 pips usually)
         pips = price_diff * 10
         
-        return potential_loss, risk_percent, pips
+        # Standard Cent Lot: 0.1 Lot = $0.10 per point? 
+        # For $1.0 risk on a 5.0 point move ($50 move per 1 lot):
+        # We need Lot = 1.0 / (PriceDiff * Multiplier)
+        # Let's assume standard Cent Lot (0.1 Lot = $1 per 1.00 move?)
+        # For 0.1 Lot, 1.00 move = $1.00.
+        # So RecommendedLot = 1.0 / PriceDiff
+        rec_lot = round(target_risk / price_diff, 2)
+        
+        # Loss for 0.1 lot
+        loss_01 = price_diff * 0.1 * 10 # Assuming 0.1 slot = $1 per point
+        # Let's use simpler: 0.1 Lot (Cent) risks $0.10 per point.
+        potential_loss_01 = price_diff * 0.1
+        
+        return max(0.01, rec_lot), potential_loss_01, pips
 
-    def send_signal(self, signal_data):
-        """
-        Sends a professional signal message to Telegram.
-        """
+    def send_signal(self, sig):
         try:
-            potential_loss, risk_percent, pips = self.calculate_risk(signal_data['entry'], signal_data['sl'])
+            rec_lot, loss_01, pips = self.calculate_lot_recommendation(sig['entry'], sig['sl'])
             
-            emoji = "🟢" if signal_data['type'] == "BUY" else "🔴"
-            news_warning = "⚠️ <b>High Volatility News Active</b>\n" if signal_data.get('news_active') else ""
-            high_risk_warning = "⚠️ <b>High Risk for Small Balance</b> (SL > 500 pips)\n" if pips > 500 else ""
+            emoji = "🟢" if sig['type'] == "BUY" else "🔴"
+            news_warn = "⚠️ <b>High Volatility Warning (News)</b>\n" if sig.get('news_active') else ""
+            risk_warn = "⚠️ <b>High Risk for Small Balance</b> (SL > 500 pips)\n" if pips > 500 else "✅ Risk: Safe"
             
-            title = f"{emoji} <b>XAUUSD {signal_data['type']} SIGNAL</b>"
-            
-            message = (
-                f"{title}\n\n"
-                f"{news_warning}"
-                f"🧠 <b>AI Score:</b> {signal_data['score']}/10\n"
-                f"📊 <b>Strategy:</b> {signal_data['strategy']}\n"
-                f"🕒 <b>Time (BKK):</b> {signal_data['time']}\n\n"
-                f"📥 <b>Entry Price:</b> {signal_data['entry']:.2f}\n"
-                f"🎯 <b>Take Profit:</b> {signal_data['tp']:.2f}\n"
-                f"🛡️ <b>Stop Loss:</b> {signal_data['sl']:.2f}\n\n"
-                f"💰 <b>Micro-Account Calc ($30):</b>\n"
-                f"├ <b>Risk Item:</b> 0.1 Lot (Cent)\n"
-                f"├ <b>Potential Loss:</b> -${potential_loss:.2f} ({risk_percent:.1f}%)\n"
-                f"└ {high_risk_warning if high_risk_warning else '✅ Risk Management: Pass'}\n\n"
-                f"⚠️ <i>This is a virtual signal for analysis only.</i>"
+            msg = (
+                f"{emoji} <b>XAUUSD {sig['type']} SIGNAL</b>\n\n"
+                f"{news_warn}"
+                f"🧠 <b>AI Score:</b> {sig['score']}/10\n"
+                f"📊 <b>Strategy:</b> {sig['strategy']}\n"
+                f"🕒 <b>Time (BKK):</b> {sig['time']}\n\n"
+                f"📥 <b>Entry Price:</b> {sig['entry']:.2f}\n"
+                f"🛡️ <b>Stop Loss:</b> {sig['sl']:.2f}\n"
+                f"🎯 <b>Take Profit:</b> {sig['tp']:.2f}\n\n"
+                f"📉 <b>Potential Loss (0.1 Lot):</b> -${loss_01:.2f}\n"
+                f"💰 <b>Micro-Account Rec (Risk $1):</b> {rec_lot} Lot\n"
+                f"{risk_warn}\n\n"
+                f"⚠️ <i>Virtual signal for analysis only.</i>"
             )
 
-            payload = {
-                "chat_id": self.chat_id,
-                "text": message,
-                "parse_mode": "HTML"
-            }
-            
-            response = requests.post(self.base_url, json=payload)
-            response.raise_for_status()
-            logger.info(f"Signal sent to Telegram: {signal_data['type']} at {signal_data['entry']}")
-            return True
+            requests.post(self.base_url, json={"chat_id": self.chat_id, "text": msg, "parse_mode": "HTML"})
+            logger.info(f"[SYSTEM] Signal notification sent for {sig['type']}")
         except Exception as e:
-            logger.error(f"Failed to send Telegram signal: {e}", exc_info=True)
-            return False
+            logger.error(f"[SYSTEM] Failed telegram notify: {e}")
 
     def send_exit_alert(self, exit_data):
-        """
-        Sends an alert when a virtual trade hits SL or TP.
-        """
         try:
-            status_emoji = "✅" if exit_data['result'] == "WIN" else "❌"
-            title = f"{status_emoji} <b>VIRTUAL TRADE CLOSED: {exit_data['result']}</b>"
-            
-            message = (
-                f"{title}\n\n"
+            emoji = "✅" if exit_data['result'] == "WIN" else "❌"
+            msg = (
+                f"{emoji} <b>VIRTUAL TRADE CLOSED: {exit_data['result']}</b>\n\n"
                 f"💰 <b>Result:</b> {exit_data['result']} ({exit_data['pips']:.1f} pips)\n"
-                f"📉 <b>MAE:</b> {exit_data['mae']:.1f} pips\n"
-                f"📈 <b>MFE:</b> {exit_data['mfe']:.1f} pips\n\n"
+                f"📏 <b>MAE:</b> {exit_data['mae']:.1f} | <b>MFE:</b> {exit_data['mfe']:.1f}\n\n"
                 f"🧠 <b>AI Analysis:</b> {exit_data['reason']}\n"
-                f"💡 <b>Advice:</b> {exit_data['advice']}"
             )
-
-            payload = {
-                "chat_id": self.chat_id,
-                "text": message,
-                "parse_mode": "HTML"
-            }
-            
-            response = requests.post(self.base_url, json=payload)
-            response.raise_for_status()
-            logger.info(f"Exit alert sent to Telegram: {exit_data['result']}")
-            return True
+            requests.post(self.base_url, json={"chat_id": self.chat_id, "text": msg, "parse_mode": "HTML"})
         except Exception as e:
-            logger.error(f"Failed to send Telegram exit alert: {e}", exc_info=True)
-            return False
+            logger.error(f"[SYSTEM] Failed exit notify: {e}")
