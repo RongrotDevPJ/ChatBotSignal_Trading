@@ -11,9 +11,9 @@ from utils.logger import logger, log_thinking
 load_dotenv()
 
 def main():
-    logger.info("[SYSTEM] Initializing XAUUSD SMC+ICT Professional Signal Bot...")
+    logger.info("[SYSTEM] Initializing XAUUSD VPS Production Version...")
     
-    # 1. MT5 Connectivity
+    # 1. MT5 Connectivity (Manual Terminal Login)
     if not mt5.initialize():
         logger.error(f"[SYSTEM] Failed to initialize MT5: {mt5.last_error()}")
         return
@@ -33,14 +33,24 @@ def main():
     tracker = VirtualTracker()
     notifier = TelegramNotifier()
     
-    last_candle_id = None 
+    # 4. Startup Notification
+    startup_ctx = {
+        'balance_msg': '$30 Micro-Calc Active',
+        'frequency': '30s SMC Pulse'
+    }
+    notifier.send_startup_message(startup_ctx)
+    logger.info("[SYSTEM] Startup notification sent to Telegram.")
+
+    last_analysis_time = 0
     last_heartbeat_time = 0
+    last_candle_id = None 
 
     try:
         while True:
-            # 0. Heartbeat & Self-Healing (Resilience)
             current_time = time.time()
-            if current_time - last_heartbeat_time > 10:
+
+            # Heartbeat & Self-Healing (Check every 10s)
+            if current_time - last_heartbeat_time >= 10:
                 terminal_info = mt5.terminal_info()
                 if not terminal_info or not terminal_info.connected:
                     logger.warning("[SYSTEM] Connection lost! Attempting self-healing...")
@@ -52,12 +62,11 @@ def main():
                         logger.error("[SYSTEM] Auto-initialization failed.")
                 last_heartbeat_time = current_time
 
-            # A. Get Live Prices for Tracker
+            # A. High-Precision Tracker (Every 1s)
             tick = mt5.symbol_info_tick(gold_symbol)
             if tick:
                 closed_trades = tracker.update(tick.bid, tick.ask)
                 for trade in closed_trades:
-                    # SL distance for advice logic
                     price_diff = abs(trade['entry'] - trade['sl'])
                     exit_data = {
                         'result': trade['result'],
@@ -71,19 +80,21 @@ def main():
                     }
                     notifier.send_exit_alert(exit_data)
             
-            # B. Periodic Analysis & De-duplication
-            signal = analyzer.analyze()
-            if signal:
-                candle_id = signal.get('candle_time')
-                if candle_id != last_candle_id:
-                    if signal['score'] >= 7:
-                        notifier.send_signal(signal)
-                        tracker.track(signal)
-                        last_candle_id = candle_id
-                        logger.info(f"[SYSTEM] Signal dispatched for candle {candle_id}")
-                else:
-                    pass
+            # B. Low-CPU SMC Analysis (Every 30s)
+            if current_time - last_analysis_time >= 30:
+                signal = analyzer.analyze()
+                if signal:
+                    candle_id = signal.get('candle_time')
+                    if candle_id != last_candle_id:
+                        if signal['score'] >= 7:
+                            notifier.send_signal(signal)
+                            tracker.track(signal)
+                            last_candle_id = candle_id
+                            logger.info(f"[SYSTEM] Signal dispatched for candle {candle_id}")
+                
+                last_analysis_time = current_time
 
+            # 1s Pulse to keep Tracker precise and CPU low
             time.sleep(1)
 
     except KeyboardInterrupt:

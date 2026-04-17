@@ -11,26 +11,27 @@ class TelegramNotifier:
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.base_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
 
+    def send_startup_message(self, context):
+        """Sends a mandatory startup verification message"""
+        msg = (
+            f"🚀 <b>Bot Started Successfully!</b>\n\n"
+            f"● <b>Status:</b> Online\n"
+            f"● <b>Balance Context:</b> {context['balance_msg']}\n"
+            f"● <b>Strategy Frequency:</b> {context['frequency']}\n"
+            f"● <b>Tracker Precision:</b> 1s (High)\n\n"
+            f"<i>Listening for XAUUSD SMC/ICT Signals...</i>"
+        )
+        return self._send(msg)
+
     def calculate_lot_recommendation(self, entry, sl, target_risk=1.0):
         """Calculates lot size to risk exactly $1.00"""
         price_diff = abs(entry - sl)
         if price_diff <= 0: return 0.01, 0, 0
         
-        # SL in Pips (Gold 1.00 points = 10 pips usually)
         pips = price_diff * 10
-        
-        # Standard Cent Lot: 0.1 Lot = $0.10 per point? 
-        # For $1.0 risk on a 5.0 point move ($50 move per 1 lot):
-        # We need Lot = 1.0 / (PriceDiff * Multiplier)
-        # Let's assume standard Cent Lot (0.1 Lot = $1 per 1.00 move?)
-        # For 0.1 Lot, 1.00 move = $1.00.
-        # So RecommendedLot = 1.0 / PriceDiff
+        # Formula: RecLot = TargetRisk / PriceDiff
         rec_lot = round(target_risk / price_diff, 2)
-        
-        # Loss for 0.1 lot
-        loss_01 = price_diff * 0.1 * 10 # Assuming 0.1 slot = $1 per point
-        # Let's use simpler: 0.1 Lot (Cent) risks $0.10 per point.
-        potential_loss_01 = price_diff * 0.1
+        potential_loss_01 = price_diff * 0.1 # 0.1 Cent Lot = $0.10 per point
         
         return max(0.01, rec_lot), potential_loss_01, pips
 
@@ -56,8 +57,7 @@ class TelegramNotifier:
                 f"{risk_warn}\n\n"
                 f"⚠️ <i>Virtual signal for analysis only.</i>"
             )
-
-            requests.post(self.base_url, json={"chat_id": self.chat_id, "text": msg, "parse_mode": "HTML"})
+            self._send(msg)
             logger.info(f"[SYSTEM] Signal notification sent for {sig['type']}")
         except Exception as e:
             logger.error(f"[SYSTEM] Failed telegram notify: {e}")
@@ -71,6 +71,16 @@ class TelegramNotifier:
                 f"📏 <b>MAE:</b> {exit_data['mae']:.1f} | <b>MFE:</b> {exit_data['mfe']:.1f}\n\n"
                 f"🧠 <b>AI Analysis:</b> {exit_data['reason']}\n"
             )
-            requests.post(self.base_url, json={"chat_id": self.chat_id, "text": msg, "parse_mode": "HTML"})
+            self._send(msg)
         except Exception as e:
             logger.error(f"[SYSTEM] Failed exit notify: {e}")
+
+    def _send(self, text):
+        try:
+            url = f"{self.base_url}"
+            payload = {"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"}
+            requests.post(url, json=payload)
+            return True
+        except Exception as e:
+            logger.error(f"[SYSTEM] Telegram _send error: {e}")
+            return False
