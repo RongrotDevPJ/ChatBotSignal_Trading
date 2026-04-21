@@ -73,10 +73,46 @@ class TelegramNotifier:
                 f"└ {risk_warn}\n\n"
                 f"⚠️ <i>Virtual signal for analysis only.</i>"
             )
-            self._send(msg)
-            logger.info(f"[SYSTEM] Dual-Mode Signal sent: {sig['type']} ({sig['mode']})")
+            res = self._send(msg)
+            message_id = res if isinstance(res, int) else None
+            logger.info(f"[SYSTEM] Dual-Mode Signal sent: {sig['type']} ({sig['mode']}) | MSG_ID: {message_id}")
+            return message_id
         except Exception as e:
             logger.error(f"[SYSTEM] Failed telegram notify: {e}")
+            return None
+
+    def send_status_update(self, trade, new_status_text):
+        """Edits an existing Telegram message to reflect new trade status"""
+        try:
+            message_id = trade.get('message_id')
+            if not message_id:
+                return
+
+            # Reconstruct message body based on trade data
+            emoji = "🟢" if "BUY" in trade['type'] else "🔴"
+            
+            # Special formatting for BE or Expired status
+            if "BE" in new_status_text:
+                status_header = f"⚡ <b>{new_status_text}</b>"
+            elif "EXPIRED" in new_status_text:
+                status_header = f"🚫 <b>{new_status_text}</b>"
+            else:
+                status_header = f"<b>{new_status_text}</b>"
+            
+            msg = (
+                f"{emoji} <b>XAUUSD {trade['type']}</b>\n"
+                f"📌 <b>STATUS: {status_header}</b>\n\n"
+                f"📥 <b>Entry Price:</b> {trade['entry']:.2f}\n"
+                f"🛡️ <b>Stop Loss:</b> {trade['sl']:.2f}\n"
+                f"🎯 <b>Take Profit:</b> {trade['tp']:.2f}\n\n"
+                f"🕒 <b>Time:</b> {trade['open_time']}\n"
+                f"🆔 <b>Trade ID:</b> <code>{trade['id']}</code>\n\n"
+                f"⚠️ <i>Status updated in real-time.</i>"
+            )
+            
+            self._send(msg, message_id=message_id)
+        except Exception as e:
+            logger.error(f"[SYSTEM] Failed status update notify: {e}")
 
     def send_exit_alert(self, exit_data):
         try:
@@ -91,12 +127,22 @@ class TelegramNotifier:
         except Exception as e:
             logger.error(f"[SYSTEM] Failed exit notify: {e}")
 
-    def _send(self, text):
+    def _send(self, text, message_id=None):
         try:
-            url = f"{self.base_url}"
             payload = {"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"}
-            requests.post(url, json=payload)
-            return True
+            
+            if message_id:
+                url = f"https://api.telegram.org/bot{self.token}/editMessageText"
+                payload["message_id"] = message_id
+            else:
+                url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+                
+            response = requests.post(url, json=payload).json()
+            if response.get("ok"):
+                return response["result"]["message_id"]
+            else:
+                logger.error(f"[SYSTEM] Telegram API Error: {response.get('description')}")
+                return None
         except Exception as e:
             logger.error(f"[SYSTEM] Telegram _send error: {e}")
-            return False
+            return None

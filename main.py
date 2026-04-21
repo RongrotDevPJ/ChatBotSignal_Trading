@@ -71,12 +71,18 @@ def main():
             # A. High-Precision Tracker (Every 1s)
             tick = mt5.symbol_info_tick(gold_symbol)
             if tick:
-                closed_trades = tracker.update(tick.bid, tick.ask)
+                closed_trades, triggered_trades, expired_trades, be_trades = tracker.update(tick.bid, tick.ask)
+                
+                # 1. Handle Triggered (PENDING -> OPEN)
+                for trade in triggered_trades:
+                    notifier.send_status_update(trade, "⚡ ACTIVATED (Price Hit)")
+
+                # 2. Handle Closed
                 for trade in closed_trades:
                     price_diff = abs(trade['entry'] - trade['sl'])
                     exit_data = {
                         'result': trade['result'],
-                        'pips': price_diff * 10,
+                        'pips': price_diff * 100, # Updated to 100x multiplier
                         'mae': trade['mae'],
                         'mfe': trade['mfe'],
                         'reason': trade['reason'],
@@ -85,6 +91,14 @@ def main():
                         'sl': trade['sl']
                     }
                     notifier.send_exit_alert(exit_data)
+
+                # 3. Handle Expired
+                for trade in expired_trades:
+                    notifier.send_status_update(trade, "🚫 SIGNAL EXPIRED")
+
+                # 4. Handle Break-Even Alert
+                for trade in be_trades:
+                    notifier.send_status_update(trade, "⚡ MOVE SL TO ENTRY (BE)")
             
             # B. Low-CPU SMC Analysis (Every 30s)
             if current_time - last_analysis_time >= 30:
@@ -100,29 +114,59 @@ def main():
                             if direction in t['type'] and t['status'] in ['PENDING', 'OPEN']
                         ]
 
+                        # 1. Determine if this is a new actionable signal
                         is_new_signal = False
-
-                        # Scenario 1: New signal is MARKET
+                        
                         if signal['mode'] == "MARKET":
-                            # Cancel ALL existing PENDING orders on Market execution
-                            tracker.cancel_all_pending()
+                            # Market signals are always "new" but blocked by last_candle_id logic later
                             is_new_signal = True
-
-                        # Scenario 2: New signal is LIMIT
                         elif signal['mode'] == "LIMIT":
-                            # Only execute if no active trades in this direction
+                            # Only actionable if no active trades in this direction
                             if not active_same_direction:
                                 is_new_signal = True
                             else:
                                 if candle_id != last_candle_id:
                                     logger.debug(f"[SYSTEM] Skipped duplicate {direction} LIMIT order for candle {candle_id}. Trade already active.")
 
-                        # Dispatch if logic clears
-                        if is_new_signal and (candle_id != last_candle_id or signal['mode'] == "MARKET"):
-                            notifier.send_signal(signal)
-                            tracker.add_trade(signal)
-                            last_candle_id = candle_id
-                            logger.info(f"[SYSTEM] Signal dispatched for candle {candle_id} ({signal['mode']} {direction})")
+                        # 2. Dispatch Logic
+                        if is_new_signal:
+                            # Case A: NEW Candle - Send fresh signal and cancel old pendings
+                            if candle_id != last_candle_id:
+                                # When a fresh MARKET signal comes, cancel all previous pendings
+                                if signal['mode'] == "MARKET":
+                                    for t in tracker.active_trades:
+                                        if t['status'] == 'PENDING' and t.get('message_id'):
+                                            notifier.send_status_update(t, "🚫 CANCELLED (Structure Shift)")
+                                    tracker.cancel_all_pending()
+
+                                msg_id = notifier.send_signal(signal)
+                                tracker.add_trade(signal, message_id=msg_id, candle_id=candle_id)
+                                last_candle_id = candle_id
+                                logger.info(f"[SYSTEM] NEW Signal dispatched for candle {candle_id} ({signal['mode']} {direction}) | MSG_ID: {msg_id}")
+                            
+                            # Case B: SAME Candle but Upgrade from LIMIT to MARKET
+                            elif signal['mode'] == "MARKET":
+                                # Look for an existing PENDING trade for this same candle and direction
+                                existing_pending = next((
+                                    t for t in tracker.active_trades 
+                                    if t['candle_id'] == candle_id and t['status'] == 'PENDING' and direction in t['type']
+                                ), None)
+                                
+                                if existing_pending:
+                                    # Upgrade the trade
+                                    existing_pending['status'] = 'OPEN'
+                                    existing_pending['mode'] = 'MARKET'
+                                    existing_pending['entry'] = signal['entry']
+                                    existing_pending['sl'] = signal['sl']
+                                    existing_pending['tp'] = signal['tp']
+                                    existing_pending['trigger_time'] = datetime.now().strftime("%H:%M:%S")
+                                    
+                                    tracker._sync_to_file(existing_pending, is_new=False)
+                                    notifier.send_status_update(existing_pending, "⚡ UPGRADED TO MARKET (Sweep Detected)")
+                                    logger.info(f"[SYSTEM] Signal upgraded to MARKET for candle {candle_id} | MSG_ID: {existing_pending['message_id']}")
+                                else:
+                                    # Already Market or already Open or from different candle, skip to avoid spam
+                                    pass
                 
                 last_analysis_time = current_time
 

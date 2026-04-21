@@ -52,6 +52,15 @@ class SMCAnalyzer:
         if rates is None or len(rates) < 3: return 0
         return 1 if rates[-1]['close'] > rates[0]['open'] else -1
 
+    def get_htf_trend(self):
+        """Checks H4 Trend using EMA 50"""
+        rates = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_H4, 0, 60)
+        if rates is None or len(rates) < 50: return 0
+        df = pd.DataFrame(rates)
+        ema50 = df['close'].ewm(span=50, adjust=False).mean().iloc[-1]
+        current_price = df['close'].iloc[-1]
+        return 1 if current_price > ema50 else -1
+
     def detect_pivots(self, df):
         pivots = []
         for i in range(2, len(df) - 2):
@@ -66,6 +75,15 @@ class SMCAnalyzer:
 
     def analyze(self):
         self.sync_daily_data()
+        
+        # 0. Spread Filter
+        symbol_info = mt5.symbol_info(self.symbol)
+        if symbol_info:
+            current_spread = symbol_info.spread
+            if current_spread > 700:
+                logger.warning(f"[SYSTEM] Signal Suppressed: High Spread ({current_spread} pts > 700)")
+                return None
+        
         df_m15 = self.fetch_data(mt5.TIMEFRAME_M15, 200)
         
         if df_m15 is None or df_m15.empty or len(df_m15) < 10:
@@ -120,13 +138,18 @@ class SMCAnalyzer:
         fvg_up = df_m15.iloc[-2]['low'] > df_m15.iloc[-4]['high']
         fvg_down = df_m15.iloc[-2]['high'] < df_m15.iloc[-4]['low']
         
-        ob_open = None
+        ob_low = None
+        ob_high = None
         if bos_bullish:
-            # Last down candle before boss
-            ob_open = df_m15.iloc[high_pivots[-1]['index']-1]['open']
+            # Last down candle before bos
+            ob_candle = df_m15.iloc[high_pivots[-1]['index']-1]
+            ob_open = ob_candle['open']
+            ob_low = ob_candle['low']
         elif bos_bearish:
-            # Last up candle before boss
-            ob_open = df_m15.iloc[low_pivots[-1]['index']-1]['open']
+            # Last up candle before bos
+            ob_candle = df_m15.iloc[low_pivots[-1]['index']-1]
+            ob_open = ob_candle['open']
+            ob_high = ob_candle['high']
 
         # DXY Correlation
         dxy_trend = self.get_dxy_trend()
@@ -166,10 +189,29 @@ class SMCAnalyzer:
         elif dxy_trend != 0:
             confluences.append("DXY Verified")
 
+        # HTF Context (H4 EMA 50)
+        htf_trend = self.get_htf_trend()
+        if htf_trend != 0:
+            if (signal_type.startswith("BUY") and htf_trend == 1) or (signal_type.startswith("SELL") and htf_trend == -1):
+                score += 2
+                confluences.append("H4 Trend Align")
+            else:
+                score -= 2
+                confluences.append("⚠️ H4 Counter-Trend")
+
         if score >= 6 and signal_type != "NEUTRAL":
-            atr = (df_m15['high'] - df_m15['low']).rolling(14).mean().iloc[-1]
-            sl = entry_price - (atr * 2) if signal_type.startswith("BUY") else entry_price + (atr * 2)
-            tp = entry_price + (atr * 4) if signal_type.startswith("BUY") else entry_price - (atr * 4)
+            # Structural SL Calculation
+            buffer = 0.2 # $0.20 buffer as requested
+            if signal_type.startswith("BUY"):
+                # Use OB Low or Sweep Low
+                struct_sl = ob_low if ob_low else last_closed_candle['low']
+                sl = struct_sl - buffer
+                # Default TP 1:2 RR as minimum
+                tp = entry_price + (abs(entry_price - sl) * 2)
+            else: # SELL
+                struct_sl = ob_high if ob_high else last_closed_candle['high']
+                sl = struct_sl + buffer
+                tp = entry_price - (abs(entry_price - sl) * 2)
 
             return {
                 "type": signal_type,

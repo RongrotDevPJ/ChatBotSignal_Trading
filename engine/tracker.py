@@ -25,7 +25,7 @@ class VirtualTracker:
             except Exception as e:
                 logger.error(f"[SYSTEM] Failed to load history: {e}")
         
-    def add_trade(self, signal_data):
+    def add_trade(self, signal_data, message_id=None, candle_id=None):
         """Adds a new trade. LIMIT orders start as PENDING."""
         is_limit = "LIMIT" in signal_data['type']
         
@@ -40,7 +40,10 @@ class VirtualTracker:
             'trigger_time': None,
             'mae': 0.0,
             'mfe': 0.0,
-            'status': 'PENDING' if is_limit else 'OPEN'
+            'be_notified': False, # Added BE flag
+            'status': 'PENDING' if is_limit else 'OPEN',
+            'message_id': message_id,
+            'candle_id': candle_id
         }
         
         self.active_trades.append(trade)
@@ -48,12 +51,32 @@ class VirtualTracker:
         log_thinking(f"Virtual Trade Registered: {trade['type']} @ {trade['entry']} ({trade['status']})")
 
     def update(self, current_bid, current_ask):
-        """Updates prices. Triggers PENDING orders if hit."""
+        """Updates prices. Triggers PENDING orders if hit and handles expiry/BE."""
         closed_trades = []
+        triggered_trades = []
+        expired_trades = []
+        be_trades = []
         
-        for trade in self.active_trades:
-            # 1. Handle Pending Order Activation
+        now = datetime.now()
+        expiry_hours = int(os.getenv("SIGNAL_EXPIRY_HOURS", 24))
+        
+        for trade in self.active_trades[:]:
+            # 1. Handle Pending Order Activation or Expiry
             if trade['status'] == 'PENDING':
+                # Check Expiry
+                try:
+                    open_dt = datetime.strptime(trade['id'], "%Y%m%d%H%M%S")
+                    age_hours = (now - open_dt).total_seconds() / 3600
+                    if age_hours >= expiry_hours:
+                        trade['status'] = 'CANCELLED'
+                        trade['reason'] = "Signal Expired"
+                        trade['close_time'] = datetime.now().strftime("%H:%M:%S")
+                        expired_trades.append(trade)
+                        self._sync_to_file(trade, is_new=False)
+                        self.active_trades.remove(trade)
+                        continue
+                except: pass
+
                 triggered = False
                 if "BUY LIMIT" in trade['type'] and current_ask <= trade['entry']:
                     triggered = True
@@ -63,6 +86,7 @@ class VirtualTracker:
                 if triggered:
                     trade['status'] = 'OPEN'
                     trade['trigger_time'] = datetime.now().strftime("%H:%M:%S")
+                    triggered_trades.append(trade)
                     self._sync_to_file(trade, is_new=False)
                     log_thinking(f"[SYSTEM] PENDING {trade['type']} Triggered @ {trade['entry']}")
                 else:
@@ -71,7 +95,9 @@ class VirtualTracker:
             # 2. Handle Open Order Monitoring
             if trade['status'] == 'OPEN':
                 if "BUY" in trade['type']:
-                    floating_pips = (current_bid - trade['entry']) * 10 
+                    # Use 100x multiplier for XAUUSD points (1.00 = 100 points)
+                    floating_pips = (current_bid - trade['entry']) * 100 
+                    risk_points = (trade['entry'] - trade['sl']) * 100
                     adverse = min(0, floating_pips)
                     favorable = max(0, floating_pips)
                     
@@ -81,7 +107,8 @@ class VirtualTracker:
                         self._close_trade(trade, "WIN", current_bid, closed_trades)
                         
                 else: # SELL
-                    floating_pips = (trade['entry'] - current_ask) * 10
+                    floating_pips = (trade['entry'] - current_ask) * 100
+                    risk_points = (trade['sl'] - trade['entry']) * 100
                     adverse = min(0, floating_pips) 
                     favorable = max(0, floating_pips)
                     
@@ -89,6 +116,15 @@ class VirtualTracker:
                         self._close_trade(trade, "LOSS", current_ask, closed_trades)
                     elif current_ask <= trade['tp']:
                         self._close_trade(trade, "WIN", current_ask, closed_trades)
+
+                # Update Break-Even (BE) Alert 
+                if not trade.get('be_notified', False):
+                    # Conditions: 1:1 RR or 150 points (1.5$)
+                    if favorable >= risk_points or favorable >= 150:
+                        trade['be_notified'] = True
+                        be_trades.append(trade)
+                        self._sync_to_file(trade, is_new=False)
+                        log_thinking(f"[SYSTEM] BE Alert triggered for {trade['id']} at +{favorable:.1f} pips")
 
                 # Update MAE/MFE 
                 trade['mae'] = max(trade['mae'], abs(adverse))
@@ -98,7 +134,7 @@ class VirtualTracker:
             if t in self.active_trades:
                 self.active_trades.remove(t)
                 
-        return closed_trades
+        return closed_trades, triggered_trades, expired_trades, be_trades
 
     def _close_trade(self, trade, result, exit_price, closed_list):
         trade['status'] = 'CLOSED'
