@@ -138,6 +138,7 @@ class SMCAnalyzer:
         fvg_up = df_m15.iloc[-2]['low'] > df_m15.iloc[-4]['high']
         fvg_down = df_m15.iloc[-2]['high'] < df_m15.iloc[-4]['low']
         
+        ob_open = None
         ob_low = None
         ob_high = None
         if bos_bullish:
