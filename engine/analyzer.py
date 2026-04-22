@@ -212,21 +212,23 @@ class SMCAnalyzer:
                 sl = struct_sl + buffer
 
             # 2. Minimum SL Distance Rule (3.0$ / 300 points)
-            min_sl_dist = 3.0
+            MIN_SL_GOLD = 3.0
             current_dist = abs(entry_price - sl)
             
-            if current_dist < min_sl_dist:
+            if current_dist < MIN_SL_GOLD:
                 if signal_type.startswith("BUY"):
-                    sl = entry_price - min_sl_dist
+                    sl = entry_price - MIN_SL_GOLD
                 else:
-                    sl = entry_price + min_sl_dist
-                log_thinking(f"[RISK] SL adjusted to minimum 3.0$ distance: {sl:.2f}")
+                    sl = entry_price + MIN_SL_GOLD
+                log_thinking(f"[RISK] SL adjusted to minimum {MIN_SL_GOLD}$ distance: {sl:.2f}")
 
             # 3. TP Calculation (Default 1:2 RR as minimum)
+            # Ensure TP is calculated FROM the final SL distance
+            final_sl_dist = abs(entry_price - sl)
             if signal_type.startswith("BUY"):
-                tp = entry_price + (abs(entry_price - sl) * 2)
+                tp = entry_price + (final_sl_dist * 2)
             else:
-                tp = entry_price - (abs(entry_price - sl) * 2)
+                tp = entry_price - (final_sl_dist * 2)
 
             # 4. Pip Calculation (1.00 move = 100 pips for Gold)
             sl_pips = abs(entry_price - sl) * 100
