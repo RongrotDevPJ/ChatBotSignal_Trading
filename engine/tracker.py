@@ -36,6 +36,8 @@ class VirtualTracker:
             'entry': signal_data['entry'],
             'sl': signal_data['sl'],
             'tp': signal_data['tp'],
+            'sl_pips': signal_data.get('sl_pips', 0.0),
+            'tp_pips': signal_data.get('tp_pips', 0.0),
             'open_time': signal_data['time'],
             'trigger_time': None,
             'mae': 0.0,

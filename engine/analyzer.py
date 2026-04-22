@@ -201,18 +201,36 @@ class SMCAnalyzer:
                 confluences.append("⚠️ H4 Counter-Trend")
 
         if score >= 6 and signal_type != "NEUTRAL":
-            # Structural SL Calculation
+            # 1. Structural SL Calculation
             buffer = 0.2 # $0.20 buffer as requested
             if signal_type.startswith("BUY"):
                 # Use OB Low or Sweep Low
                 struct_sl = ob_low if ob_low else last_closed_candle['low']
                 sl = struct_sl - buffer
-                # Default TP 1:2 RR as minimum
-                tp = entry_price + (abs(entry_price - sl) * 2)
             else: # SELL
                 struct_sl = ob_high if ob_high else last_closed_candle['high']
                 sl = struct_sl + buffer
+
+            # 2. Minimum SL Distance Rule (3.0$ / 300 points)
+            min_sl_dist = 3.0
+            current_dist = abs(entry_price - sl)
+            
+            if current_dist < min_sl_dist:
+                if signal_type.startswith("BUY"):
+                    sl = entry_price - min_sl_dist
+                else:
+                    sl = entry_price + min_sl_dist
+                log_thinking(f"[RISK] SL adjusted to minimum 3.0$ distance: {sl:.2f}")
+
+            # 3. TP Calculation (Default 1:2 RR as minimum)
+            if signal_type.startswith("BUY"):
+                tp = entry_price + (abs(entry_price - sl) * 2)
+            else:
                 tp = entry_price - (abs(entry_price - sl) * 2)
+
+            # 4. Pip Calculation (1.00 move = 100 pips for Gold)
+            sl_pips = abs(entry_price - sl) * 100
+            tp_pips = abs(tp - entry_price) * 100
 
             return {
                 "type": signal_type,
@@ -220,6 +238,8 @@ class SMCAnalyzer:
                 "entry": entry_price,
                 "sl": sl,
                 "tp": tp,
+                "sl_pips": sl_pips,
+                "tp_pips": tp_pips,
                 "score": score,
                 "strategy": " + ".join(confluences),
                 "candle_time": last_candle_time,

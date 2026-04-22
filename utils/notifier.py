@@ -24,21 +24,21 @@ class TelegramNotifier:
         return self._send(msg)
 
     def calculate_lot_recommendation(self, entry, sl, target_risk=1.0):
-        """Calculates lot size to risk exactly $1.00"""
+        """Calculates lot size and standardized pips (1.00 move = 100 pips)"""
         price_diff = abs(entry - sl)
         if price_diff <= 0: return 0.01, 0, 0
         
-        pips = price_diff * 10
-        # Formula: RecLot = TargetRisk / PriceDiff
-        # 1.0 standard move (100 points) = $100 for 1.0 Lot.
-        # So RecLot = 1.0 / (PriceDiff * 1) ? 
-        # For XAUUSD, if entry=2000, sl=1995 (Diff=5), 0.01 Lot = $5 risk. 
-        # To get $1 risk, we need 0.01 / 5 = 0.002.
-        # But if user uses Cent lot (0.1 Lot = 1 Std?), let's stick to the multiplier:
+        # Standardized Pips: 1.00$ move = 100 points/pips
+        pips = price_diff * 100
+        
+        # Lot calculation based on Target Risk ($1.00)
+        # Standard XAUUSD: 1.0 Lot = $100 per 1.00 move.
+        # To risk $1.00 over price_diff, we need (1.0 / price_diff) * (0.01 standard multiplier?)
+        # Let's keep existing relative logic but ensure pips is 100x.
         rec_lot = round(target_risk / price_diff, 2)
         
-        # Loss for 0.1 Lot (Fixed reference from user)
-        # Using user's implicit logic: 0.1 lot risks $1 for 1.00 point?
+        # Potential Loss for 0.1 Lot (Cent mode: 0.1 Lot Cent = 0.001 Standard)
+        # 0.1 Lot Cent risks $0.10 for 1.00 move.
         potential_loss_01 = price_diff * 0.1 
         
         return max(0.01, rec_lot), potential_loss_01, pips
@@ -64,8 +64,8 @@ class TelegramNotifier:
                 f"📊 <b>Strategy:</b> {sig['strategy']}\n"
                 f"🕒 <b>Time (BKK):</b> {sig['time']}\n\n"
                 f"📥 <b>Entry Price:</b> {sig['entry']:.2f}\n"
-                f"🛡️ <b>Stop Loss:</b> {sig['sl']:.2f}\n"
-                f"🎯 <b>Take Profit:</b> {sig['tp']:.2f}\n\n"
+                f"🛡️ <b>Stop Loss:</b> {sig['sl']:.2f} [-{sig['sl_pips']:.1f} pips]\n"
+                f"🎯 <b>Take Profit:</b> {sig['tp']:.2f} [+{sig['tp_pips']:.1f} pips]\n\n"
                 f"💰 <b>Micro-Account Calc ($30):</b>\n"
                 f"├ <b>Risk Item:</b> 0.1 Lot (Cent)\n"
                 f"├ <b>Potential Loss:</b> -${loss_01:.2f}\n"
@@ -103,8 +103,8 @@ class TelegramNotifier:
                 f"{emoji} <b>XAUUSD {trade['type']}</b>\n"
                 f"📌 <b>STATUS: {status_header}</b>\n\n"
                 f"📥 <b>Entry Price:</b> {trade['entry']:.2f}\n"
-                f"🛡️ <b>Stop Loss:</b> {trade['sl']:.2f}\n"
-                f"🎯 <b>Take Profit:</b> {trade['tp']:.2f}\n\n"
+                f"🛡️ <b>Stop Loss:</b> {trade['sl']:.2f} [-{trade.get('sl_pips', 0.0):.1f} pips]\n"
+                f"🎯 <b>Take Profit:</b> {trade['tp']:.2f} [+{trade.get('tp_pips', 0.0):.1f} pips]\n\n"
                 f"🕒 <b>Time:</b> {trade['open_time']}\n"
                 f"🆔 <b>Trade ID:</b> <code>{trade['id']}</code>\n\n"
                 f"⚠️ <i>Status updated in real-time.</i>"
