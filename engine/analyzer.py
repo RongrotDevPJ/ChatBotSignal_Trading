@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime
 import pytz
 from utils.logger import logger, log_thinking
+from utils.news_filter import NewsFilter
 
 class SMCAnalyzer:
     def __init__(self, symbol="XAUUSD"):
@@ -15,6 +16,7 @@ class SMCAnalyzer:
         self.pdl = None
         self.last_daily_sync_date = None
         self.last_logged_candle_time = None
+        self.news_filter = NewsFilter()
 
     def _find_symbol(self, default, keys):
         symbols = mt5.symbols_get()
@@ -74,6 +76,9 @@ class SMCAnalyzer:
         return pivots
 
     def analyze(self):
+        if self.news_filter.is_news_active():
+            return None
+            
         self.sync_daily_data()
         
         # 0. Spread Filter
@@ -234,6 +239,12 @@ class SMCAnalyzer:
             sl_pips = abs(entry_price - sl) * 100
             tp_pips = abs(tp - entry_price) * 100
 
+            # Determine Session based on BKK time
+            now_hour = datetime.now(self.timezone).hour
+            if 6 <= now_hour < 14: session = "ASIAN"
+            elif 14 <= now_hour < 19: session = "LONDON"
+            else: session = "NY"
+
             return {
                 "type": signal_type,
                 "mode": execution_mode,
@@ -246,7 +257,12 @@ class SMCAnalyzer:
                 "strategy": " + ".join(confluences),
                 "candle_time": last_candle_time,
                 "time": datetime.now(self.timezone).strftime("%H:%M:%S"),
-                "news_active": False
+                "news_active": False,
+                "session": session,
+                "dxy_trend": dxy_trend,
+                "htf_trend": htf_trend,
+                "confluence_count": len(confluences),
+                "spread_at_entry": current_spread if 'current_spread' in locals() else 0
             }
         
         return None

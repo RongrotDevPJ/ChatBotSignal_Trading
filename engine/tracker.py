@@ -38,6 +38,7 @@ class VirtualTracker:
             'tp': signal_data['tp'],
             'sl_pips': signal_data.get('sl_pips', 0.0),
             'tp_pips': signal_data.get('tp_pips', 0.0),
+            'score': signal_data.get('score', 0),
             'open_time': signal_data['time'],
             'trigger_time': None,
             'mae': 0.0,
@@ -45,7 +46,13 @@ class VirtualTracker:
             'be_notified': False, # Added BE flag
             'status': 'PENDING' if is_limit else 'OPEN',
             'message_id': message_id,
-            'candle_id': candle_id
+            'candle_id': candle_id,
+            'session': signal_data.get('session', 'UNKNOWN'),
+            'dxy_trend': signal_data.get('dxy_trend', 0),
+            'htf_trend': signal_data.get('htf_trend', 0),
+            'confluence_count': signal_data.get('confluence_count', 0),
+            'spread_at_entry': signal_data.get('spread_at_entry', 0),
+            'time_in_trade_minutes': 0
         }
         
         self.active_trades.append(trade)
@@ -124,9 +131,10 @@ class VirtualTracker:
                     # Conditions: 1:1 RR or 150 points (1.5$)
                     if favorable >= risk_points or favorable >= 150:
                         trade['be_notified'] = True
+                        trade['sl'] = trade['entry']  # Move SL to entry price (Break-Even)
                         be_trades.append(trade)
                         self._sync_to_file(trade, is_new=False)
-                        log_thinking(f"[SYSTEM] BE Alert triggered for {trade['id']} at +{favorable:.1f} pips")
+                        log_thinking(f"[SYSTEM] BE Alert triggered for {trade['id']} at +{favorable:.1f} pips. SL moved to entry: {trade['entry']}")
 
                 # Update MAE/MFE 
                 trade['mae'] = max(trade['mae'], abs(adverse))
@@ -139,11 +147,20 @@ class VirtualTracker:
         return closed_trades, triggered_trades, expired_trades, be_trades
 
     def _close_trade(self, trade, result, exit_price, closed_list):
+        if result == "LOSS" and trade.get('be_notified', False):
+            result = "BREAK-EVEN"
+            
         trade['status'] = 'CLOSED'
         trade['result'] = result
         trade['exit_price'] = exit_price
         trade['close_time'] = datetime.now().strftime("%H:%M:%S")
         
+        try:
+            open_dt = datetime.strptime(trade['id'], "%Y%m%d%H%M%S")
+            trade['time_in_trade_minutes'] = int((datetime.now() - open_dt).total_seconds() / 60)
+        except:
+            trade['time_in_trade_minutes'] = 0
+            
         trade['reason'] = self._analyze_exit(trade)
         trade['advice'] = self._get_advice(trade)
         
@@ -152,6 +169,8 @@ class VirtualTracker:
         log_thinking(f"Virtual Trade Closed: {result} with MAE: {trade['mae']:.1f} pips")
 
     def _analyze_exit(self, trade):
+        if trade['result'] == "BREAK-EVEN":
+            return "Price reached break-even threshold but reversed to entry."
         if trade['result'] == "LOSS" and trade['mfe'] > 10:
             return "Price was in profit but reversed. Possibly Liquidity Grab or News."
         if trade['result'] == "LOSS" and trade['mae'] > 0:
@@ -159,6 +178,8 @@ class VirtualTracker:
         return "Target reached successfully."
 
     def _get_advice(self, trade):
+        if trade['result'] == "BREAK-EVEN":
+            return "Good capital preservation. BE protected against the reversal."
         if trade['result'] == "LOSS":
             return "Consider trailing stop or wider SL based on recent OB."
         return "Strategy working as intended."
@@ -172,6 +193,16 @@ class VirtualTracker:
                 self._sync_to_file(trade, is_new=False)
                 self.active_trades.remove(trade)
                 log_thinking(f"[SYSTEM] Virtual PENDING order {trade['id']} has been CANCELLED.")
+
+    def override_trade(self, trade, reason):
+        """Cancels a specific pending trade with a given reason."""
+        trade['status'] = 'CANCELLED'
+        trade['reason'] = reason
+        trade['close_time'] = datetime.now().strftime("%H:%M:%S")
+        self._sync_to_file(trade, is_new=False)
+        if trade in self.active_trades:
+            self.active_trades.remove(trade)
+        log_thinking(f"[SYSTEM] Virtual PENDING order {trade['id']} has been CANCELLED (Override).")
 
     def _sync_to_file(self, trade, is_new=False):
         try:

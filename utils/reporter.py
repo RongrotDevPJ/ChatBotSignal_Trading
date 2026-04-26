@@ -34,6 +34,7 @@ class WeeklyReporter:
         # คำนวณสถิติ
         wins = sum(1 for t in closed_trades if t.get('result') == 'WIN')
         losses = sum(1 for t in closed_trades if t.get('result') == 'LOSS')
+        bes = sum(1 for t in closed_trades if t.get('result') == 'BREAK-EVEN')
         win_rate = (wins / total_trades) * 100
 
         net_pips = 0.0
@@ -70,7 +71,7 @@ class WeeklyReporter:
             f"📅 <b>Date:</b> {now}\n"
             f"------------------------------\n"
             f"🎯 <b>Total Signals:</b> {total_trades} Trades\n"
-            f"✅ <b>Wins:</b> {wins} | ❌ <b>Losses:</b> {losses}\n"
+            f"✅ <b>Wins:</b> {wins} | ❌ <b>Losses:</b> {losses} | 🔄 <b>BE:</b> {bes}\n"
             f"🏆 <b>Win Rate:</b> {win_rate:.1f}%\n"
             f"📈 <b>Net Profit:</b> {net_pips:+.1f} Pips\n\n"
             f"📏 <b>Avg MAE:</b> {avg_mae:.1f} Pips (โดนลากเฉลี่ย)\n"

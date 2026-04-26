@@ -17,42 +17,21 @@ class TelegramNotifier:
             f"🚀 <b>Bot Started Successfully!</b>\n\n"
             f"● <b>Status:</b> Online\n"
             f"● <b>Execution Mode:</b> Dual (Market/Limit)\n"
-            f"● <b>Strategy Context:</b> {context['balance_msg']}\n"
+            f"● <b>Strategy Context:</b> {context.get('mode', 'Institutional Signal Provider')}\n"
             f"● <b>Structure Loop:</b> {context['frequency']}\n\n"
             f"<i>Listening for XAUUSD SMC/ICT Signals...</i>"
         )
         return self._send(msg)
 
-    def calculate_lot_recommendation(self, entry, sl, target_risk=1.0):
-        """Calculates lot size for Cent Account (1.0 Lot = $1.00 risk per 1.00 move)"""
-        price_diff = abs(entry - sl)
-        if price_diff <= 0: return 0.01, 0, 0
-        
-        # Standardized Pips: 1.00$ move = 100 points/pips
-        pips = price_diff * 100
-        
-        # Lot calculation based on Target Risk ($1.00)
-        # For Cent Accounts, 1.0 lot risks $1.00 per $1.00 price move.
-        rec_lot = round(target_risk / price_diff, 2)
-        
-        # Potential Loss for 0.1 Lot (Cent mode)
-        # 0.1 Lot risks $0.10 for 1.00 price move.
-        potential_loss_01 = price_diff * 0.1 
-        
-        return max(0.01, rec_lot), potential_loss_01, pips
-
     def send_signal(self, sig):
         try:
-            rec_lot, loss_01, pips = self.calculate_lot_recommendation(sig['entry'], sig['sl'])
-            
             # Dual Mode UI
             is_limit = sig.get('mode') == "LIMIT"
             mode_emoji = "⏳" if is_limit else "⚡"
             mode_label = "PENDING ORDER" if is_limit else "MARKET EXECUTION"
             
             emoji = "🟢" if "BUY" in sig['type'] else "🔴"
-            news_warn = "⚠️ <b>High Volatiltiy News</b>\n" if sig.get('news_active') else ""
-            risk_warn = "⚠️ <b>High Risk for Small Balance</b>\n" if pips > 500 else "✅ Risk: Safe"
+            news_warn = "⚠️ <b>High Volatility News</b>\n" if sig.get('news_active') else ""
             
             msg = (
                 f"{emoji} <b>XAUUSD {sig['type']} SIGNAL</b>\n"
@@ -64,11 +43,6 @@ class TelegramNotifier:
                 f"📥 <b>Entry Price:</b> <code>{sig['entry']:.2f}</code>\n"
                 f"🛡️ <b>Stop Loss:</b> <code>{sig['sl']:.2f}</code> [-{sig['sl_pips']:.1f} pips]\n"
                 f"🎯 <b>Take Profit:</b> <code>{sig['tp']:.2f}</code> [+{sig['tp_pips']:.1f} pips]\n\n"
-                f"💰 <b>Micro-Account Calc ($30):</b>\n"
-                f"├ <b>Risk Item:</b> 0.1 Lot\n"
-                f"├ <b>Potential Loss:</b> -${loss_01:.2f}\n"
-                f"├ <b>Micro-Lot Rec (Risk $1):</b> {rec_lot} Lot\n"
-                f"└ {risk_warn}\n\n"
                 f"⚠️ <i>Virtual signal for analysis only.</i>"
             )
             res = self._send(msg)
@@ -114,7 +88,12 @@ class TelegramNotifier:
 
     def send_exit_alert(self, exit_data):
         try:
-            emoji = "✅" if exit_data['result'] == "WIN" else "❌"
+            if exit_data['result'] == "WIN":
+                emoji = "✅"
+            elif exit_data['result'] == "LOSS":
+                emoji = "❌"
+            else:
+                emoji = "🔄"
             msg = (
                 f"{emoji} <b>VIRTUAL TRADE CLOSED: {exit_data['result']}</b>\n\n"
                 f"💰 <b>Result:</b> {exit_data['result']} ({exit_data['pips']:.1f} pips)\n"

@@ -41,7 +41,7 @@ def main():
     
     # 4. Startup Notification
     startup_ctx = {
-        'balance_msg': '$30 Micro-Calc Active',
+        'mode': 'Institutional Signal Provider',
         'frequency': '30s SMC Pulse'
     }
     notifier.send_startup_message(startup_ctx)
@@ -108,65 +108,79 @@ def main():
                     if signal['score'] >= 6:
                         direction = "BUY" if "BUY" in signal['type'] else "SELL"
                         
-                        # Find existing trades with same direction
-                        active_same_direction = [
-                            t for t in tracker.active_trades 
-                            if direction in t['type'] and t['status'] in ['PENDING', 'OPEN']
-                        ]
-
-                        # 1. Determine if this is a new actionable signal
-                        is_new_signal = False
-                        
-                        if signal['mode'] == "MARKET":
-                            # Market signals are always "new" but blocked by last_candle_id logic later
-                            is_new_signal = True
-                        elif signal['mode'] == "LIMIT":
-                            # Only actionable if no active trades in this direction
-                            if not active_same_direction:
-                                is_new_signal = True
-                            else:
-                                if candle_id != last_candle_id:
-                                    logger.debug(f"[SYSTEM] Skipped duplicate {direction} LIMIT order for candle {candle_id}. Trade already active.")
-
-                        # 2. Dispatch Logic
-                        if is_new_signal:
-                            # Case A: NEW Candle - Send fresh signal and cancel old pendings
-                            if candle_id != last_candle_id:
-                                # When a fresh MARKET signal comes, cancel all previous pendings
-                                if signal['mode'] == "MARKET":
-                                    for t in tracker.active_trades:
-                                        if t['status'] == 'PENDING' and t.get('message_id'):
-                                            notifier.send_status_update(t, "🚫 CANCELLED (Structure Shift)")
-                                    tracker.cancel_all_pending()
-
-                                msg_id = notifier.send_signal(signal)
-                                tracker.add_trade(signal, message_id=msg_id, candle_id=candle_id)
-                                last_candle_id = candle_id
-                                logger.info(f"[SYSTEM] NEW Signal dispatched for candle {candle_id} ({signal['mode']} {direction}) | MSG_ID: {msg_id}")
+                        # Handle same-candle LIMIT -> MARKET upgrade (preserved logic)
+                        if signal['mode'] == "MARKET" and candle_id == last_candle_id:
+                            existing_pending = next((
+                                t for t in tracker.active_trades 
+                                if t['candle_id'] == candle_id and t['status'] == 'PENDING' and direction in t['type']
+                            ), None)
                             
-                            # Case B: SAME Candle but Upgrade from LIMIT to MARKET
-                            elif signal['mode'] == "MARKET":
-                                # Look for an existing PENDING trade for this same candle and direction
-                                existing_pending = next((
-                                    t for t in tracker.active_trades 
-                                    if t['candle_id'] == candle_id and t['status'] == 'PENDING' and direction in t['type']
-                                ), None)
-                                
-                                if existing_pending:
-                                    # Upgrade the trade
-                                    existing_pending['status'] = 'OPEN'
-                                    existing_pending['mode'] = 'MARKET'
-                                    existing_pending['entry'] = signal['entry']
-                                    existing_pending['sl'] = signal['sl']
-                                    existing_pending['tp'] = signal['tp']
-                                    existing_pending['trigger_time'] = datetime.now().strftime("%H:%M:%S")
-                                    
-                                    tracker._sync_to_file(existing_pending, is_new=False)
-                                    notifier.send_status_update(existing_pending, "⚡ UPGRADED TO MARKET (Sweep Detected)")
-                                    logger.info(f"[SYSTEM] Signal upgraded to MARKET for candle {candle_id} | MSG_ID: {existing_pending['message_id']}")
+                            if existing_pending:
+                                existing_pending['status'] = 'OPEN'
+                                existing_pending['mode'] = 'MARKET'
+                                existing_pending['entry'] = signal['entry']
+                                existing_pending['sl'] = signal['sl']
+                                existing_pending['tp'] = signal['tp']
+                                existing_pending['trigger_time'] = datetime.now().strftime("%H:%M:%S")
+                                tracker._sync_to_file(existing_pending, is_new=False)
+                                notifier.send_status_update(existing_pending, "⚡ UPGRADED TO MARKET (Sweep Detected)")
+                                logger.info(f"[SYSTEM] Signal upgraded to MARKET for candle {candle_id} | MSG_ID: {existing_pending['message_id']}")
+                                continue # We are done with this signal
+
+                        # If not an upgrade, treat it as a new signal candidate
+                        # Skip exact duplicate LIMIT signals (same candle, same direction)
+                        if signal['mode'] == "LIMIT" and candle_id == last_candle_id:
+                            # We already dispatched a limit for this candle in this direction, skip
+                            logger.debug(f"[SYSTEM] Skipped duplicate {direction} LIMIT order for candle {candle_id}.")
+                            continue
+
+                        # Apply Smart Override Logic
+                        active_trades = tracker.active_trades
+                        max_signals = int(os.getenv("MAX_ACTIVE_SIGNALS", 2))
+                        new_score = signal.get('score', 0)
+                        
+                        trade_to_override = None
+                        can_dispatch = False
+                        
+                        same_dir_pending = [t for t in active_trades if t['status'] == 'PENDING' and direction in t['type']]
+                        active_pending = [t for t in active_trades if t['status'] == 'PENDING']
+                        
+                        # Rule A: Same-Direction Override
+                        if same_dir_pending:
+                            target = same_dir_pending[0]
+                            if new_score >= target.get('score', 0):
+                                can_dispatch = True
+                                trade_to_override = target
+                            else:
+                                logger.info(f"[SYSTEM] Skipped new {direction} signal. Existing PENDING has higher/equal score ({target.get('score')} >= {new_score}).")
+                        
+                        # Rule B: Capacity Override
+                        elif len(active_trades) >= max_signals:
+                            if active_pending:
+                                lowest_pending = min(active_pending, key=lambda x: x.get('score', 0))
+                                if new_score > lowest_pending.get('score', 0):
+                                    can_dispatch = True
+                                    trade_to_override = lowest_pending
                                 else:
-                                    # Already Market or already Open or from different candle, skip to avoid spam
-                                    pass
+                                    logger.info(f"[SYSTEM] Skipped signal. At capacity and new score ({new_score}) is not strictly higher than lowest pending ({lowest_pending.get('score')}).")
+                            else:
+                                logger.info("[SYSTEM] Skipped signal. At capacity and all active trades are OPEN (untouchable).")
+                                
+                        # Standard Dispatch
+                        else:
+                            can_dispatch = True
+
+                        if can_dispatch:
+                            if trade_to_override:
+                                # Execute the override
+                                notifier.send_status_update(trade_to_override, "🚫 SIGNAL CANCELLED (Overridden)")
+                                tracker.override_trade(trade_to_override, "Overridden by a higher-probability setup.")
+                            
+                            # Dispatch the new signal
+                            msg_id = notifier.send_signal(signal)
+                            tracker.add_trade(signal, message_id=msg_id, candle_id=candle_id)
+                            last_candle_id = candle_id
+                            logger.info(f"[SYSTEM] NEW Signal dispatched for candle {candle_id} ({signal['mode']} {direction}) | MSG_ID: {msg_id}")
                 
                 last_analysis_time = current_time
 
