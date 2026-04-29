@@ -16,6 +16,8 @@ class SMCAnalyzer:
         self.pdl = None
         self.last_daily_sync_date = None
         self.last_logged_candle_time = None
+        self.last_market_signal_candle = None
+        self.last_killzone_log_time = None
         self.news_filter = NewsFilter()
 
     def _find_symbol(self, default, keys):
@@ -75,8 +77,28 @@ class SMCAnalyzer:
                 pivots.append({'type': 'LOW', 'price': df['low'].iloc[i], 'index': i})
         return pivots
 
+    def is_within_kill_zone(self):
+        now = datetime.now(self.timezone)
+        time_str = now.strftime("%H:%M")
+        
+        # London Kill Zone: 14:00 to 17:30 BKK
+        if "14:00" <= time_str < "17:30":
+            return True
+        # New York Kill Zone: 19:00 to 22:30 BKK
+        if "19:00" <= time_str < "22:30":
+            return True
+            
+        return False
+
     def analyze(self):
         if self.news_filter.is_news_active():
+            return None
+            
+        if not self.is_within_kill_zone():
+            now = datetime.now(self.timezone)
+            if self.last_killzone_log_time is None or self.last_killzone_log_time.hour != now.hour:
+                logger.info("[SYSTEM] Market is outside of Kill Zones. Waiting for liquidity.")
+                self.last_killzone_log_time = now
             return None
             
         self.sync_daily_data()
@@ -165,13 +187,17 @@ class SMCAnalyzer:
         signal_type = "NEUTRAL"
         entry_price = last_closed_price
         
+        tick = mt5.symbol_info_tick(self.symbol)
+        
         # 1. Market Execution Priority: Sweep
         if sweep_bullish:
             signal_type = "BUY"
             execution_mode = "MARKET"
+            if tick: entry_price = tick.ask
         elif sweep_bearish:
             signal_type = "SELL"
             execution_mode = "MARKET"
+            if tick: entry_price = tick.bid
         
         # 2. Limit Order Priority: BOS with valid OB
         elif (bos_bullish or bos_bearish) and ob_open:
@@ -227,17 +253,19 @@ class SMCAnalyzer:
                     sl = entry_price + MIN_SL_GOLD
                 log_thinking(f"[RISK] SL adjusted to minimum {MIN_SL_GOLD}$ distance: {sl:.2f}")
 
-            # 3. TP Calculation (Default 1:2 RR as minimum)
-            # Ensure TP is calculated FROM the final SL distance
+            # 3. TP Calculation (TP1 at 1:1, TP2 at 1:2)
             final_sl_dist = abs(entry_price - sl)
             if signal_type.startswith("BUY"):
-                tp = entry_price + (final_sl_dist * 2)
+                tp1 = entry_price + final_sl_dist
+                tp2 = entry_price + (final_sl_dist * 2)
             else:
-                tp = entry_price - (final_sl_dist * 2)
+                tp1 = entry_price - final_sl_dist
+                tp2 = entry_price - (final_sl_dist * 2)
 
             # 4. Pip Calculation (1.00 move = 100 pips for Gold)
             sl_pips = abs(entry_price - sl) * 100
-            tp_pips = abs(tp - entry_price) * 100
+            tp1_pips = abs(tp1 - entry_price) * 100
+            tp2_pips = abs(tp2 - entry_price) * 100
 
             # Determine Session based on BKK time
             now_hour = datetime.now(self.timezone).hour
@@ -245,14 +273,22 @@ class SMCAnalyzer:
             elif 14 <= now_hour < 19: session = "LONDON"
             else: session = "NY"
 
+            if execution_mode == "MARKET":
+                if self.last_market_signal_candle == last_candle_time:
+                    logger.warning("[SYSTEM] Signal Suppressed: Market order already executed on this candle.")
+                    return None
+                self.last_market_signal_candle = last_candle_time
+
             return {
                 "type": signal_type,
                 "mode": execution_mode,
                 "entry": entry_price,
                 "sl": sl,
-                "tp": tp,
+                "tp1": tp1,
+                "tp2": tp2,
                 "sl_pips": sl_pips,
-                "tp_pips": tp_pips,
+                "tp1_pips": tp1_pips,
+                "tp2_pips": tp2_pips,
                 "score": score,
                 "strategy": " + ".join(confluences),
                 "candle_time": last_candle_time,

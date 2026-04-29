@@ -35,15 +35,18 @@ class VirtualTracker:
             'mode': signal_data.get('mode', 'MARKET'),
             'entry': signal_data['entry'],
             'sl': signal_data['sl'],
-            'tp': signal_data['tp'],
+            'tp1': signal_data.get('tp1'),
+            'tp2': signal_data.get('tp2'),
             'sl_pips': signal_data.get('sl_pips', 0.0),
-            'tp_pips': signal_data.get('tp_pips', 0.0),
+            'tp1_pips': signal_data.get('tp1_pips', 0.0),
+            'tp2_pips': signal_data.get('tp2_pips', 0.0),
             'score': signal_data.get('score', 0),
             'open_time': signal_data['time'],
             'trigger_time': None,
             'mae': 0.0,
             'mfe': 0.0,
-            'be_notified': False, # Added BE flag
+            'tp1_hit': False,
+            'be_notified': False, # Keep for fallback compatibility
             'status': 'PENDING' if is_limit else 'OPEN',
             'message_id': message_id,
             'candle_id': candle_id,
@@ -112,8 +115,10 @@ class VirtualTracker:
                     
                     if current_bid <= trade['sl']:
                         self._close_trade(trade, "LOSS", current_bid, closed_trades)
-                    elif current_bid >= trade['tp']:
-                        self._close_trade(trade, "WIN", current_bid, closed_trades)
+                    else:
+                        tp2 = trade.get('tp2', trade.get('tp'))
+                        if current_bid >= tp2:
+                            self._close_trade(trade, "WIN", current_bid, closed_trades)
                         
                 else: # SELL
                     floating_pips = (trade['entry'] - current_ask) * 100
@@ -123,18 +128,23 @@ class VirtualTracker:
                     
                     if current_ask >= trade['sl']:
                         self._close_trade(trade, "LOSS", current_ask, closed_trades)
-                    elif current_ask <= trade['tp']:
-                        self._close_trade(trade, "WIN", current_ask, closed_trades)
+                    else:
+                        tp2 = trade.get('tp2', trade.get('tp'))
+                        if current_ask <= tp2:
+                            self._close_trade(trade, "WIN", current_ask, closed_trades)
 
-                # Update Break-Even (BE) Alert 
-                if not trade.get('be_notified', False):
-                    # Conditions: 1:1 RR or 150 points (1.5$)
-                    if favorable >= risk_points or favorable >= 150:
+                # Update Break-Even (BE) Alert & TP1
+                if not trade.get('tp1_hit', False) and not trade.get('be_notified', False):
+                    tp1 = trade.get('tp1', trade.get('tp'))
+                    
+                    if ("BUY" in trade['type'] and current_bid >= tp1) or \
+                       ("SELL" in trade['type'] and current_ask <= tp1):
+                        trade['tp1_hit'] = True
                         trade['be_notified'] = True
                         trade['sl'] = trade['entry']  # Move SL to entry price (Break-Even)
                         be_trades.append(trade)
                         self._sync_to_file(trade, is_new=False)
-                        log_thinking(f"[SYSTEM] BE Alert triggered for {trade['id']} at +{favorable:.1f} pips. SL moved to entry: {trade['entry']}")
+                        log_thinking(f"[SYSTEM] TP1 HIT for {trade['id']} at {tp1}. SL moved to entry: {trade['entry']}")
 
                 # Update MAE/MFE 
                 trade['mae'] = max(trade['mae'], abs(adverse))
@@ -171,10 +181,10 @@ class VirtualTracker:
     def _analyze_exit(self, trade):
         if trade['result'] == "BREAK-EVEN":
             return "Price reached break-even threshold but reversed to entry."
-        if trade['result'] == "LOSS" and trade['mfe'] > 10:
-            return "Price was in profit but reversed. Possibly Liquidity Grab or News."
-        if trade['result'] == "LOSS" and trade['mae'] > 0:
-            return "Direct hit to SL. Structure was likely invalidated."
+        if trade['result'] == "LOSS":
+            if trade['mfe'] > 10:
+                return "Price was in profit but reversed. Possibly Liquidity Grab or News."
+            return "Stop Loss triggered. Structure was likely invalidated."
         return "Target reached successfully."
 
     def _get_advice(self, trade):

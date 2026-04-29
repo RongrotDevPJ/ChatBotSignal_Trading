@@ -96,9 +96,9 @@ def main():
                 for trade in expired_trades:
                     notifier.send_status_update(trade, "🚫 SIGNAL EXPIRED")
 
-                # 4. Handle Break-Even Alert
+                # 4. Handle TP1 / Break-Even Alert
                 for trade in be_trades:
-                    notifier.send_status_update(trade, "⚡ MOVE SL TO ENTRY (BE)")
+                    notifier.send_status_update(trade, "🔥 TP1 HIT! Secure partials & move SL to entry.")
             
             # B. Low-CPU SMC Analysis (Every 30s)
             if current_time - last_analysis_time >= 30:
@@ -120,7 +120,10 @@ def main():
                                 existing_pending['mode'] = 'MARKET'
                                 existing_pending['entry'] = signal['entry']
                                 existing_pending['sl'] = signal['sl']
-                                existing_pending['tp'] = signal['tp']
+                                existing_pending['tp1'] = signal.get('tp1')
+                                existing_pending['tp2'] = signal.get('tp2')
+                                existing_pending['tp1_pips'] = signal.get('tp1_pips')
+                                existing_pending['tp2_pips'] = signal.get('tp2_pips')
                                 existing_pending['trigger_time'] = datetime.now().strftime("%H:%M:%S")
                                 tracker._sync_to_file(existing_pending, is_new=False)
                                 notifier.send_status_update(existing_pending, "⚡ UPGRADED TO MARKET (Sweep Detected)")

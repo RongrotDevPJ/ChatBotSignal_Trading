@@ -1,7 +1,7 @@
 import json
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from utils.logger import logger
 
 class WeeklyReporter:
@@ -23,60 +23,109 @@ class WeeklyReporter:
             logger.error(f"[REPORTER] Failed to read history: {e}")
             return
 
-        # กรองเฉพาะออเดอร์ที่ปิดแล้ว
-        closed_trades = [t for t in data if t.get('status') == 'CLOSED']
-        total_trades = len(closed_trades)
+        now = datetime.now()
+        seven_days_ago = now - timedelta(days=7)
 
+        # Filter for trades closed in the last 7 days
+        recent_closed_trades = []
+        for t in data:
+            if t.get('status') == 'CLOSED':
+                try:
+                    # 'id' is format '%Y%m%d%H%M%S'
+                    trade_time = datetime.strptime(t['id'], "%Y%m%d%H%M%S")
+                    if trade_time >= seven_days_ago:
+                        recent_closed_trades.append(t)
+                except Exception as e:
+                    logger.debug(f"[REPORTER] Could not parse trade ID {t.get('id')} as datetime: {e}")
+
+        total_trades = len(recent_closed_trades)
         if total_trades == 0:
-            logger.info("[REPORTER] No closed trades this week.")
+            logger.info("[REPORTER] No closed trades in the past 7 days.")
+            self._send("📊 <b>WEEKLY PERFORMANCE REPORT</b> 📊\n\nNo trades were closed this week.")
             return
 
-        # คำนวณสถิติ
-        wins = sum(1 for t in closed_trades if t.get('result') == 'WIN')
-        losses = sum(1 for t in closed_trades if t.get('result') == 'LOSS')
-        bes = sum(1 for t in closed_trades if t.get('result') == 'BREAK-EVEN')
-        win_rate = (wins / total_trades) * 100
-
+        wins = 0
+        losses = 0
+        bes = 0
         net_pips = 0.0
-        total_mae = 0.0
-        total_mfe = 0.0
 
-        for t in closed_trades:
-            # หาผลต่างราคา (Pips)
-            # Price diff calculation assuming Gold mapping
-            diff = t['exit_price'] - t['entry']
-            pips = (diff * 10) if t['type'].startswith('BUY') else (-diff * 10)
+        session_stats = {
+            'ASIAN': {'pips': 0.0, 'wins': 0, 'total': 0},
+            'LONDON': {'pips': 0.0, 'wins': 0, 'total': 0},
+            'NY': {'pips': 0.0, 'wins': 0, 'total': 0},
+            'UNKNOWN': {'pips': 0.0, 'wins': 0, 'total': 0}
+        }
+
+        for t in recent_closed_trades:
+            result = t.get('result', '')
+            trade_type = t.get('type', '')
+            session = t.get('session', 'UNKNOWN')
+            
+            pips = 0.0
+            if result == 'WIN':
+                wins += 1
+                if 'BUY' in trade_type:
+                    pips = (t['exit_price'] - t['entry']) * 100
+                elif 'SELL' in trade_type:
+                    pips = (t['entry'] - t['exit_price']) * 100
+            elif result == 'LOSS':
+                losses += 1
+                if 'BUY' in trade_type:
+                    pips = (t['exit_price'] - t['entry']) * 100
+                elif 'SELL' in trade_type:
+                    pips = (t['entry'] - t['exit_price']) * 100
+            elif result == 'BREAK-EVEN':
+                bes += 1
+                pips = 0.0
+            
             net_pips += pips
             
-            total_mae += t.get('mae', 0.0)
-            total_mfe += t.get('mfe', 0.0)
+            if session not in session_stats:
+                session_stats[session] = {'pips': 0.0, 'wins': 0, 'total': 0}
+                
+            session_stats[session]['pips'] += pips
+            session_stats[session]['total'] += 1
+            if result == 'WIN':
+                session_stats[session]['wins'] += 1
 
-        avg_mae = total_mae / total_trades
-        avg_mfe = total_mfe / total_trades
+        win_rate = (wins / total_trades) * 100
 
-        # 💡 AI Insight Generation
-        insight = "ระบบทำงานได้ตามมาตรฐานปกติ"
-        if win_rate >= 60 and net_pips > 0:
-            insight = "🎯 ยอดเยี่ยม! ความแม่นยำสูงมาก โครงสร้าง SMC ของคุณคมกริบ"
-        elif win_rate < 40:
-            insight = "⚠️ ความแม่นยำต่ำในสัปดาห์นี้ อาจเจอภาวะตลาด Choppy แนะนำให้รอกดเฉพาะ Signal Score 8+ เท่านั้น"
-        elif avg_mae > 15 and win_rate > 50:
-            insight = "💡 Win Rate ดี แต่โดนลาก (MAE) ค่อนข้างลึก พิจารณาเผื่อระยะ SL ให้กว้างขึ้นอีกนิด หรือเน้นเข้า Limit Order เป็นหลัก"
-        elif avg_mfe > 20 and net_pips < 0:
-            insight = "💡 ราคาพุ่งไปทำกำไร (MFE) ได้ไกล แต่กลับมาชน SL (Net Pips ติดลบ) คุณควรพิจารณาเลื่อน SL บังหน้าทุน (Break-Even) เมื่อกำไรถึง 1R"
+        # Determine Best Session
+        best_session_name = "N/A"
+        best_session_pips = float('-inf')
+        best_session_winrate = -1
 
-        now = datetime.now().strftime("%d %b %Y")
+        for session_name, stats in session_stats.items():
+            if stats['total'] > 0 and session_name != 'UNKNOWN':
+                s_winrate = (stats['wins'] / stats['total']) * 100
+                s_pips = stats['pips']
+                
+                if s_pips > best_session_pips:
+                    best_session_pips = s_pips
+                    best_session_winrate = s_winrate
+                    best_session_name = session_name
+                elif s_pips == best_session_pips:
+                    if s_winrate > best_session_winrate:
+                        best_session_winrate = s_winrate
+                        best_session_name = session_name
+
+        if best_session_name == "N/A":
+            best_session_name = "NONE"
+        else:
+            best_session_name = best_session_name.upper()
+
+        start_date_str = seven_days_ago.strftime('%Y-%m-%d')
+        end_date_str = now.strftime('%Y-%m-%d')
+
         msg = (
-            f"📊 <b>XAUUSD Weekly Performance Report</b>\n"
-            f"📅 <b>Date:</b> {now}\n"
-            f"------------------------------\n"
-            f"🎯 <b>Total Signals:</b> {total_trades} Trades\n"
-            f"✅ <b>Wins:</b> {wins} | ❌ <b>Losses:</b> {losses} | 🔄 <b>BE:</b> {bes}\n"
+            f"📊 <b>WEEKLY PERFORMANCE REPORT</b> 📊\n"
+            f"🗓️ {start_date_str} to {end_date_str}\n\n"
+            f"📈 <b>Total Trades:</b> {total_trades}\n"
+            f"✅ <b>Wins:</b> {wins} | ❌ <b>Losses:</b> {losses} | 🛡️ <b>BE:</b> {bes}\n"
             f"🏆 <b>Win Rate:</b> {win_rate:.1f}%\n"
-            f"📈 <b>Net Profit:</b> {net_pips:+.1f} Pips\n\n"
-            f"📏 <b>Avg MAE:</b> {avg_mae:.1f} Pips (โดนลากเฉลี่ย)\n"
-            f"📏 <b>Avg MFE:</b> {avg_mfe:.1f} Pips (วิ่งกำไรเฉลี่ย)\n\n"
-            f"💡 <b>AI Insight:</b> <i>{insight}</i>"
+            f"💰 <b>Net Pips:</b> {net_pips:+.1f} pips\n\n"
+            f"🌟 <b>Best Session:</b> {best_session_name}\n"
+            f"🤖 <b>Strategy Context:</b> Institutional Signal Provider"
         )
 
         self._send(msg)

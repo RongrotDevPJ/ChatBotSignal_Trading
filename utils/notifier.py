@@ -42,7 +42,8 @@ class TelegramNotifier:
                 f"🕒 <b>Time (BKK):</b> {sig['time']}\n\n"
                 f"📥 <b>Entry Price:</b> <code>{sig['entry']:.2f}</code>\n"
                 f"🛡️ <b>Stop Loss:</b> <code>{sig['sl']:.2f}</code> [-{sig['sl_pips']:.1f} pips]\n"
-                f"🎯 <b>Take Profit:</b> <code>{sig['tp']:.2f}</code> [+{sig['tp_pips']:.1f} pips]\n\n"
+                f"🎯 <b>TP1 (1:1):</b> <code>{sig['tp1']:.2f}</code> [+{sig['tp1_pips']:.1f} pips]\n"
+                f"🚀 <b>TP2 (1:2):</b> <code>{sig['tp2']:.2f}</code> [+{sig['tp2_pips']:.1f} pips]\n\n"
                 f"⚠️ <i>Virtual signal for analysis only.</i>"
             )
             res = self._send(msg)
@@ -71,12 +72,16 @@ class TelegramNotifier:
             else:
                 status_header = f"<b>{new_status_text}</b>"
             
+            tp1_str = f"<code>{trade['tp1']:.2f}</code> [+{trade.get('tp1_pips', 0.0):.1f} pips]" if trade.get('tp1') else f"<code>{trade.get('tp', 0.0):.2f}</code> [+{trade.get('tp_pips', 0.0):.1f} pips]"
+            tp2_str = f"🚀 <b>TP2 (1:2):</b> <code>{trade['tp2']:.2f}</code> [+{trade.get('tp2_pips', 0.0):.1f} pips]\n" if trade.get('tp2') else ""
+            
             msg = (
                 f"{emoji} <b>XAUUSD {trade['type']}</b>\n"
                 f"📌 <b>STATUS: {status_header}</b>\n\n"
                 f"📥 <b>Entry Price:</b> <code>{trade['entry']:.2f}</code>\n"
                 f"🛡️ <b>Stop Loss:</b> <code>{trade['sl']:.2f}</code> [-{trade.get('sl_pips', 0.0):.1f} pips]\n"
-                f"🎯 <b>Take Profit:</b> <code>{trade['tp']:.2f}</code> [+{trade.get('tp_pips', 0.0):.1f} pips]\n\n"
+                f"🎯 <b>TP1 (1:1):</b> {tp1_str}\n"
+                f"{tp2_str}\n"
                 f"🕒 <b>Time:</b> {trade['open_time']}\n"
                 f"🆔 <b>Trade ID:</b> <code>{trade['id']}</code>\n\n"
                 f"⚠️ <i>Status updated in real-time.</i>"
