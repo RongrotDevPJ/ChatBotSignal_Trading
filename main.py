@@ -81,14 +81,20 @@ def main():
                 for trade in closed_trades:
                     price_diff = abs(trade['entry'] - trade['sl'])
                     exit_data = {
-                        'result': trade['result'],
-                        'pips': price_diff * 100, # Updated to 100x multiplier
-                        'mae': trade['mae'],
-                        'mfe': trade['mfe'],
-                        'reason': trade['reason'],
-                        'advice': trade['advice'],
-                        'entry': trade['entry'],
-                        'sl': trade['sl']
+                        'result':                trade['result'],
+                        'pips':                  price_diff * 100,
+                        'mae':                   trade['mae'],
+                        'mfe':                   trade['mfe'],
+                        'reason':                trade['reason'],
+                        'advice':                trade['advice'],
+                        'entry':                 trade['entry'],
+                        'sl':                    trade['sl'],
+                        # Enriched fields for FIX #10 (detailed exit alert)
+                        'score':                 trade.get('score', 0),
+                        'session':               trade.get('session', 'UNKNOWN'),
+                        'sl_pips':               trade.get('sl_pips', 0),
+                        'tp2_pips':              trade.get('tp2_pips', 0),
+                        'time_in_trade_minutes': trade.get('time_in_trade_minutes', 0),
                     }
                     notifier.send_exit_alert(exit_data)
 
